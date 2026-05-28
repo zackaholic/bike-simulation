@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "A world simulation traversed by pedaling a bike trainer"
 requires-python = ">=3.12"
 dependencies = [
+    "matplotlib>=3.8",
     "numpy>=2.0",
     "zarr>=3.0",
 ]
