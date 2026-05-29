@@ -80,10 +80,17 @@ class EventStore:
             "appeared_year": row["appeared_year"],
         }
 
-    def list_species(self) -> list[str]:
-        """Return all species IDs."""
-        rows = self._conn.execute("SELECT species_id FROM species").fetchall()
-        return [row["species_id"] for row in rows]
+    def list_species(self) -> list[dict]:
+        """Return all species as dicts with at least a 'species_id' key."""
+        rows = self._conn.execute("SELECT * FROM species").fetchall()
+        return [
+            {
+                "species_id": row["species_id"],
+                "parent_id": row["parent_id"],
+                "appeared_year": row["appeared_year"],
+            }
+            for row in rows
+        ]
 
     # ── Distinguished individuals ────────────────────────────────────
 

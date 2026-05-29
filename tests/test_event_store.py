@@ -51,8 +51,9 @@ def test_list_species(store):
     store.add_species("sp_b", {"trait": 2.0})
     store.add_species("sp_c", {"trait": 3.0})
 
-    ids = store.list_species()
-    assert set(ids) == {"sp_a", "sp_b", "sp_c"}
+    species = store.list_species()
+    ids = {sp["species_id"] for sp in species}
+    assert ids == {"sp_a", "sp_b", "sp_c"}
 
 
 # --- Distinguished individuals ---
