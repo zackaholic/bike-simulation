@@ -49,11 +49,35 @@ If a request seems to require violating any of these, raise it explicitly rather
 
 ## Where we are right now
 
-Project is at Phase 0 (per `docs/roadmap.md`). Next steps:
-1. Set up the repo skeleton.
-2. Pin Python toolchain (3.12, uv, ruff).
-3. Lock in format choices (Zarr, SQLite, JSON manifests).
-4. Implement the `World` class data model and seeded RNG infrastructure.
+Phases 0 through 8 are complete. The simulation is end-to-end functional.
+
+**What's built (by phase):**
+- **Phase 0:** Repo skeleton, `World` data model, seeded RNG infrastructure.
+- **Phase 1:** `RasterStore` (Zarr), `EventStore` (SQLite), World directory lifecycle.
+- **Phase 2:** `WorldQuery` interface (Layer B abstraction).
+- **Phase 3:** Debug visualizer (matplotlib PNGs) + synthetic world generator + CLI.
+- **Phase 4:** Geology stub (noise heightmap, Voronoi bedrock, soil parent material).
+- **Phase 5:** Climate-hydrology (climate envelope, D8 flow accumulation, hydraulic erosion, derived-state cache).
+- **Phase 6:** Basic ecology (6 ancestor species, suitability, competition, dispersal, seed bank).
+- **Phase 7:** Advanced ecology (distinguished individuals, speciation via fragmentation, fire CA + blowdown disturbance).
+- **Phase 8:** Orchestrator + CLI (tier scheduling, ride advancement, manual commands).
+
+**By the numbers:** 138 tests passing, ~3100 lines source, ~2300 lines tests.
+
+**CLI:** `python -m bike_sim` with subcommands: `create`, `advance`, `ride`, `status`, `fire`, `visualize`.
+
+**End-to-end benchmark:** seed 42 after 125 simulated years produces 15 species (from 6 ancestors), 753 distinguished individuals, 35 fires + 9 blowdowns.
+
+**Next steps:**
+1. Phase 9 — Godot extractor (produce renderer-specific outputs from simulation state).
+2. Phase 10 — Asset agent.
+
+**Known gaps to address:**
+- Erosion is too gentle; landscapes lack dramatic carved features.
+- No river graph (only D8 flow accumulation raster; no discrete channel/confluence structure).
+- No upward event communication (lower tiers cannot yet notify higher tiers of state changes via events).
+- Individual lifecycle is accumulate-only (distinguished individuals are created but never die or age out).
+- Ecology tick performance needs profiling and likely optimization as world complexity grows.
 
 Hardware: development on MacBook Pro (Apple Silicon); target mini PC to be sourced. Write CPU-vectorized numpy/numba code; reserve GPU compute for a later port with CPU fallback.
 

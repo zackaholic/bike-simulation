@@ -93,3 +93,38 @@ All entries below come from the initial planning conversation; they represent th
 ---
 
 ## Subsequent decisions go below this line
+
+### Zarr v3 API adaptation
+**Decision**: Use Zarr v3 API (can't pass both `data` and `dtype` to create_array). Let Zarr infer dtype from data.
+
+**Why**: We pinned zarr>=3.0 and the v3 API changed parameter validation. Simpler to let it infer.
+
+### list_layers returns sorted results
+**Decision**: RasterStore.list_layers() returns sorted layer names.
+
+**Why**: Zarr group key iteration order is not guaranteed to be deterministic across store instances. Sorting ensures reproducible iteration for tests and deterministic behavior.
+
+### EventStore.list_species returns dicts not strings
+**Decision**: Changed list_species() to return list of dicts (with species_id, parent_id, appeared_year) instead of list of strings.
+
+**Why**: Ecology tier needs parent_id for speciation logic, and iterating species as dicts is more natural than fetching each separately.
+
+### Climate-hydrology tick threshold logic
+**Decision**: Climate ticks when `ecology_simulated_year // 1000 > climate_tick_number - 1`, subtracting the bootstrap tick from create_world().
+
+**Why**: create_world() ticks climate once to bootstrap derived-state cache. This initial tick shouldn't count toward the ecology-driven threshold. The subtraction ensures the first ecology-triggered climate tick happens at year 1000, not year 0.
+
+### Speciation via downsampled connected components
+**Decision**: Run connected component analysis on a 10x downsampled grid (100x100) rather than the full 1000x1000 grid.
+
+**Why**: BFS flood fill on 1M cells in pure Python is too slow. 100x100 (10K cells) is fast and still detects landscape-scale fragmentation. Fine-grained fragmentation at the cell level isn't meaningful for speciation anyway.
+
+### Disturbance skipped on tick 0
+**Decision**: Fire and blowdown disturbance is skipped on the first ecology tick.
+
+**Why**: Ensures all disturbance events have simulated_year > 0, which tests rely on and which makes logical sense (no vegetation to burn before initial establishment).
+
+### Ride duration mapping
+**Decision**: 1 simulated year per minute of riding, capped at 50 years.
+
+**Why**: Starting point from design docs. Couples world existence to rider engagement (emotional weight) while preventing jarring fast-forwards. Cap ensures the rider doesn't return to an unrecognizable world after a long ride.
