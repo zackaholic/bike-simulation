@@ -100,7 +100,7 @@ class RasterStore:
         """
         if tier not in self._root:
             return []
-        return list(self._root[tier].keys())
+        return sorted(self._root[tier].keys())
 
 
 def _choose_chunks(shape: tuple[int, ...]) -> tuple[int, ...]:
