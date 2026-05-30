@@ -35,6 +35,7 @@ def _cmd_create(args: argparse.Namespace) -> None:
     print(f"  Geology ticks: {world.tier_clocks['geology'].tick_number}")
     print(f"  Climate ticks: {world.tier_clocks['climate_hydrology'].tick_number}")
     print(f"  Ecology ticks: {world.tier_clocks['ecology'].tick_number}")
+    print(f"  Version: {world.current_version}")
     world.close()
 
 
@@ -55,6 +56,7 @@ def _cmd_advance(args: argparse.Namespace) -> None:
     print(f"  Ecology ticks: {result['ecology_ticks']}")
     print(f"  Climate ticks: {result['climate_hydrology_ticks']}")
     print(f"  Geology ticks: {result['geology_ticks']}")
+    print(f"  Version: {world.current_version}")
     world.close()
 
 
@@ -75,6 +77,7 @@ def _cmd_ride(args: argparse.Namespace) -> None:
     print(f"  Ecology ticks: {result['ecology_ticks']}")
     print(f"  Climate ticks: {result['climate_hydrology_ticks']}")
     print(f"  Geology ticks: {result['geology_ticks']}")
+    print(f"  Version: {world.current_version}")
     world.close()
 
 
@@ -93,6 +96,7 @@ def _cmd_status(args: argparse.Namespace) -> None:
         print(f"  {tier_name}: tick {clock.tick_number}, year {clock.simulated_year:.1f}")
     print(f"  Species count: {info['species_count']}")
     print(f"  Individual count: {info['individual_count']}")
+    print(f"  Versions: {info['total_versions']}")
     world.close()
 
 

@@ -38,6 +38,7 @@ class EventStore:
         conn.row_factory = sqlite3.Row
         store = cls(conn)
         store._create_tables()
+        store._migrate()
         return store
 
     @classmethod
@@ -45,7 +46,9 @@ class EventStore:
         """Open an existing EventStore database."""
         conn = sqlite3.connect(str(path))
         conn.row_factory = sqlite3.Row
-        return cls(conn)
+        store = cls(conn)
+        store._migrate()
+        return store
 
     def close(self) -> None:
         """Close the database connection."""
@@ -78,16 +81,38 @@ class EventStore:
             "genome": json.loads(row["genome_json"]),
             "parent_id": row["parent_id"],
             "appeared_year": row["appeared_year"],
+            "extinct_year": row["extinct_year"],
         }
 
-    def list_species(self) -> list[dict]:
-        """Return all species as dicts with at least a 'species_id' key."""
-        rows = self._conn.execute("SELECT * FROM species").fetchall()
+    def mark_species_extinct(self, species_id: str, extinct_year: float) -> None:
+        """Mark a species as extinct at the given year."""
+        self._conn.execute(
+            "UPDATE species SET extinct_year = ? WHERE species_id = ?",
+            (extinct_year, species_id),
+        )
+        self._conn.commit()
+
+    def list_species(self, alive_at_year: float | None = None) -> list[dict]:
+        """Return all species as dicts with at least a 'species_id' key.
+
+        If alive_at_year is given, filter to species where:
+        appeared_year <= alive_at_year AND (extinct_year IS NULL OR extinct_year > alive_at_year)
+        """
+        if alive_at_year is not None:
+            rows = self._conn.execute(
+                """SELECT * FROM species
+                   WHERE appeared_year <= ?
+                     AND (extinct_year IS NULL OR extinct_year > ?)""",
+                (alive_at_year, alive_at_year),
+            ).fetchall()
+        else:
+            rows = self._conn.execute("SELECT * FROM species").fetchall()
         return [
             {
                 "species_id": row["species_id"],
                 "parent_id": row["parent_id"],
                 "appeared_year": row["appeared_year"],
+                "extinct_year": row["extinct_year"],
             }
             for row in rows
         ]
@@ -121,18 +146,41 @@ class EventStore:
             "x": row["x"],
             "y": row["y"],
             "appeared_year": row["appeared_year"],
+            "died_year": row["died_year"],
         }
 
-    def find_individuals_near(self, x: float, y: float, radius: float) -> list[dict]:
+    def kill_individual(self, individual_id: str, died_year: float) -> None:
+        """Mark an individual as dead at the given year."""
+        self._conn.execute(
+            "UPDATE individuals SET died_year = ? WHERE individual_id = ?",
+            (died_year, individual_id),
+        )
+        self._conn.commit()
+
+    def find_individuals_near(
+        self, x: float, y: float, radius: float, alive_at_year: float | None = None
+    ) -> list[dict]:
         """Find all individuals within a given radius of a point.
 
         Uses a bounding-box pre-filter followed by exact distance check.
+
+        If alive_at_year is given, filter to individuals where:
+        appeared_year <= alive_at_year AND (died_year IS NULL OR died_year > alive_at_year)
         """
-        rows = self._conn.execute(
-            """SELECT * FROM individuals
-               WHERE x BETWEEN ? AND ? AND y BETWEEN ? AND ?""",
-            (x - radius, x + radius, y - radius, y + radius),
-        ).fetchall()
+        if alive_at_year is not None:
+            rows = self._conn.execute(
+                """SELECT * FROM individuals
+                   WHERE x BETWEEN ? AND ? AND y BETWEEN ? AND ?
+                     AND appeared_year <= ?
+                     AND (died_year IS NULL OR died_year > ?)""",
+                (x - radius, x + radius, y - radius, y + radius, alive_at_year, alive_at_year),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """SELECT * FROM individuals
+                   WHERE x BETWEEN ? AND ? AND y BETWEEN ? AND ?""",
+                (x - radius, x + radius, y - radius, y + radius),
+            ).fetchall()
         # Exact circular distance check
         results = []
         for row in rows:
@@ -146,6 +194,7 @@ class EventStore:
                         "x": row["x"],
                         "y": row["y"],
                         "appeared_year": row["appeared_year"],
+                        "died_year": row["died_year"],
                     }
                 )
         return results
@@ -197,7 +246,8 @@ class EventStore:
                 species_id   TEXT PRIMARY KEY,
                 genome_json  TEXT NOT NULL,
                 parent_id    TEXT,
-                appeared_year REAL DEFAULT 0.0
+                appeared_year REAL DEFAULT 0.0,
+                extinct_year REAL
             );
 
             CREATE TABLE IF NOT EXISTS individuals (
@@ -205,7 +255,8 @@ class EventStore:
                 species_id   TEXT NOT NULL,
                 x            REAL NOT NULL,
                 y            REAL NOT NULL,
-                appeared_year REAL DEFAULT 0.0
+                appeared_year REAL DEFAULT 0.0,
+                died_year    REAL
             );
 
             CREATE INDEX IF NOT EXISTS idx_individuals_xy
@@ -226,6 +277,18 @@ class EventStore:
             CREATE INDEX IF NOT EXISTS idx_events_year
                 ON events (year);
         """)
+        self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns that may be missing from older databases."""
+        for stmt in [
+            "ALTER TABLE individuals ADD COLUMN died_year REAL",
+            "ALTER TABLE species ADD COLUMN extinct_year REAL",
+        ]:
+            try:
+                self._conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass  # Column already exists
         self._conn.commit()
 
     @staticmethod

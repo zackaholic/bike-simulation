@@ -19,7 +19,10 @@ are derived from the seed.
 
 from __future__ import annotations
 
+import datetime
 import json
+import os
+import tempfile
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -81,6 +84,8 @@ class World:
     version: int = 1
     rasters: RasterStore | None = field(default=None, repr=False)
     events: EventStore | None = field(default=None, repr=False)
+    _version_log: list[dict] = field(default_factory=list, repr=False)
+    _current_version: int = field(default=-1, repr=False)
 
     @classmethod
     def create(cls, path: Path, seed: int) -> World:
@@ -114,7 +119,7 @@ class World:
         rasters = RasterStore.open(path / "rasters")
         events = EventStore.open(path / "events.db")
 
-        return cls(
+        world = cls(
             seed=manifest["seed"],
             tier_clocks=tier_clocks,
             simulated_year=manifest["simulated_year"],
@@ -122,6 +127,9 @@ class World:
             rasters=rasters,
             events=events,
         )
+        world._version_log = manifest.get("versions", [])
+        world._current_version = manifest.get("current_version", -1)
+        return world
 
     def close(self) -> None:
         """Close both data stores. Safe to call multiple times."""
@@ -135,6 +143,56 @@ class World:
         # the reference for consistency.
         self.rasters = None
 
+    @property
+    def current_version(self) -> int:
+        """The latest version ID, or -1 if no versions committed."""
+        return self._current_version
+
+    def commit_version(self, trigger: str) -> int:
+        """Create a new version snapshot.
+
+        Records: version_id, tier_clocks snapshot, timestamp, trigger string,
+        and layer_index from the RasterStore.
+
+        Returns the new version_id.
+        """
+        new_id = self._current_version + 1
+
+        entry = {
+            "version_id": new_id,
+            "tier_clocks": {
+                name: {
+                    "tick_number": clock.tick_number,
+                    "simulated_year": clock.simulated_year,
+                }
+                for name, clock in self.tier_clocks.items()
+            },
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+            "trigger": trigger,
+            "layer_index": self.rasters.get_layer_index() if self.rasters else {},
+        }
+
+        self._version_log.append(entry)
+        self._current_version = new_id
+        return new_id
+
+    def get_version(self, version_id: int) -> dict:
+        """Return the version entry for a given version_id."""
+        for entry in self._version_log:
+            if entry["version_id"] == version_id:
+                return entry
+        raise KeyError(f"Version {version_id} not found")
+
+    def list_versions(self) -> list[dict]:
+        """Return all version entries."""
+        return list(self._version_log)
+
+    def version_for_tier(self, version_id: int, tier: str) -> TierClock:
+        """Return the TierClock snapshot for a given tier at a given version."""
+        entry = self.get_version(version_id)
+        clock_data = entry["tier_clocks"][tier]
+        return TierClock(**clock_data)
+
     def to_dict(self) -> dict:
         """Serialize manifest fields to a plain dict (JSON-compatible).
 
@@ -146,6 +204,8 @@ class World:
             "tier_clocks": {name: asdict(clock) for name, clock in self.tier_clocks.items()},
             "simulated_year": self.simulated_year,
             "version": self.version,
+            "versions": self._version_log,
+            "current_version": self._current_version,
         }
 
     @classmethod
@@ -154,16 +214,28 @@ class World:
         tier_clocks = {
             name: TierClock(**clock_data) for name, clock_data in data["tier_clocks"].items()
         }
-        return cls(
+        world = cls(
             seed=data["seed"],
             tier_clocks=tier_clocks,
             simulated_year=data["simulated_year"],
             version=data["version"],
         )
+        world._version_log = data.get("versions", [])
+        world._current_version = data.get("current_version", -1)
+        return world
 
     def save(self, path: Path) -> None:
-        """Write the world manifest to a JSON file."""
-        path.write_text(json.dumps(self.to_dict(), indent=2) + "\n")
+        """Write the world manifest atomically (write to temp, then rename)."""
+        content = json.dumps(self.to_dict(), indent=2) + "\n"
+        fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+        try:
+            os.write(fd, content.encode())
+            os.close(fd)
+            os.replace(tmp_path, str(path))
+        except BaseException:
+            os.close(fd)
+            os.unlink(tmp_path)
+            raise
 
     @classmethod
     def load(cls, path: Path) -> World:

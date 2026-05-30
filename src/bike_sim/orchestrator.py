@@ -32,10 +32,16 @@ class Orchestrator:
         """Initialize world by ticking geology and climate-hydrology once.
 
         Ecology is *not* ticked here — it starts from zero when the first
-        ``advance()`` call runs.
+        ``advance()`` call runs.  Creates version 0 to snapshot the initial
+        world state.
         """
+        next_version = self._world.current_version + 1
+        self._world.rasters.set_version(next_version)
+
         GeologyTier(self._world).tick()
         ClimateHydrologyTier(self._world).tick()
+
+        self._world.commit_version(trigger="create_world")
 
     def advance(self, years: float) -> dict:
         """Advance simulation by the given number of years.
@@ -47,6 +53,9 @@ class Orchestrator:
 
         Returns a summary dict with tick counts.
         """
+        next_version = self._world.current_version + 1
+        self._world.rasters.set_version(next_version)
+
         eco = EcologyTier(self._world)
 
         eco_ticks = int(years / EcologyTier.YEARS_PER_TICK)
@@ -77,6 +86,8 @@ class Orchestrator:
                 if expected_geology > actual_extra_geology:
                     GeologyTier(self._world).tick()
                     geology_ticks += 1
+
+        self._world.commit_version(trigger=f"advance {years} years")
 
         return {
             "years_advanced": years,
@@ -126,4 +137,6 @@ class Orchestrator:
             "ecology_tick": self._world.tier_clocks["ecology"].tick_number,
             "species_count": len(species),
             "individual_count": len(individuals),
+            "current_version": self._world.current_version,
+            "total_versions": len(self._world.list_versions()),
         }
