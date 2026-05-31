@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bike Simulation — World Inspector</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; }
+  #map { width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<script>
+(function () {
+  // World is 50000m x 50000m. L.CRS.Simple uses pixels = meters here.
+  var worldExtent = {{ world_extent }};
+  var bounds = L.latLngBounds(
+    L.latLng(0, 0),
+    L.latLng(worldExtent, worldExtent)
+  );
+
+  var map = L.map("map", {
+    crs: L.CRS.Simple,
+    minZoom: 0,
+    maxZoom: {{ max_zoom }},
+    maxBounds: bounds.pad(0.1)
+  });
+
+  map.fitBounds(bounds);
+
+  // Tile layer pointing at our tile endpoint.
+  var version = {{ current_version }};
+  var tier = "geology";
+  var layer = "heightmap";
+
+  L.tileLayer("/api/world/" + version + "/tiles/" + tier + "/" + layer + "/{z}/{x}/{y}.png", {
+    tileSize: 256,
+    bounds: bounds,
+    minZoom: 0,
+    maxZoom: {{ max_zoom }},
+    noWrap: true,
+    tms: true
+  }).addTo(map);
+})();
+</script>
+</body>
+</html>

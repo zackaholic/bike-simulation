@@ -4,8 +4,10 @@ version = "0.1.0"
 description = "A world simulation traversed by pedaling a bike trainer"
 requires-python = ">=3.12"
 dependencies = [
+    "flask>=3.0",
     "matplotlib>=3.8",
     "numpy>=2.0",
+    "pillow>=10.0",
     "zarr>=3.0",
 ]
 
