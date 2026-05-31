@@ -179,3 +179,212 @@ class WorldQuery:
         Delegates directly to ``RasterStore.list_layers``.
         """
         return self._world.rasters.list_layers(tier)
+
+    # -- version-aware helpers -----------------------------------------------
+
+    def _version_year(self, version: int) -> float:
+        """Get the ecology simulated_year at a given version."""
+        clock = self._world.version_for_tier(version, "ecology")
+        return clock.simulated_year
+
+    # -- version-aware queries -----------------------------------------------
+
+    def get_world_metadata(self, version: int) -> dict:
+        """Return structural metadata about the world at a given version.
+
+        Includes extent, cell size, available layers grouped by tier,
+        species/individual counts alive at the version's ecology year,
+        and the tier clock snapshot.
+        """
+        ver_entry = self._world.get_version(version)
+        year = self._version_year(version)
+
+        # Layers available at this version, grouped by tier
+        layers: dict[str, list[str]] = {}
+        for tier in ["geology", "climate_hydrology", "ecology"]:
+            layers[tier] = self._world.rasters.list_layers(tier, version=version)
+
+        # Species alive at this version's year
+        species = self._world.events.list_species(alive_at_year=year)
+
+        # Individuals alive at this version's year
+        individuals = self._world.events.find_individuals_near(
+            25000, 25000, 50000, alive_at_year=year
+        )
+
+        return {
+            "extent": {"x_min": 0, "y_min": 0, "x_max": 50000, "y_max": 50000},
+            "cell_size": 50.0,
+            "grid_size": 1000,
+            "layers": layers,
+            "species_count": len(species),
+            "individual_count": len(individuals),
+            "simulated_year": year,
+            "tier_clocks": ver_entry["tier_clocks"],
+        }
+
+    def query_point(self, version: int, x: float, y: float) -> dict:
+        """Return everything known at a single world coordinate for a version.
+
+        Samples all raster layers, finds species with positive density,
+        nearby individuals (alive at the version year), and nearby events.
+        """
+        year = self._version_year(version)
+
+        # Sample all raster layers at this version
+        rasters: dict[str, float] = {}
+        for tier in ["geology", "climate_hydrology", "ecology"]:
+            for layer_name in self._world.rasters.list_layers(tier, version=version):
+                data = self._world.rasters.read_layer(tier, layer_name, version=version)
+                col = _world_to_cell(x)
+                row = _world_to_cell(y)
+                rasters[f"{tier}/{layer_name}"] = float(data[row, col])
+
+        # Species at this point with density > 0
+        species: list[dict] = []
+        for tier_layer, val in rasters.items():
+            if tier_layer.startswith("ecology/species_") and tier_layer.endswith("_density"):
+                if val > 0:
+                    sid = tier_layer.replace("ecology/species_", "").replace("_density", "")
+                    species.append({"species_id": sid, "density": val})
+
+        # Individuals near this point, alive at this version
+        individuals = self._world.events.find_individuals_near(
+            x, y, radius=100.0, alive_at_year=year
+        )
+
+        # Events near this point
+        events = self._world.events.get_events_in_region(x - 100, y - 100, x + 100, y + 100)
+
+        return {
+            "x": x,
+            "y": y,
+            "rasters": rasters,
+            "species": species,
+            "individuals": individuals,
+            "events": events,
+        }
+
+    def query_raster(
+        self,
+        version: int,
+        tier: str,
+        layer_name: str,
+        bbox: tuple[float, float, float, float],
+        target_size: tuple[int, int],
+    ) -> np.ndarray:
+        """Clip a raster to *bbox* and resample to *target_size*.
+
+        Uses nearest-neighbor resampling. *bbox* is ``(x_min, y_min, x_max, y_max)``
+        in world coordinates. *target_size* is ``(rows, cols)``.
+        """
+        data = self._world.rasters.read_layer(tier, layer_name, version=version)
+
+        x_min, y_min, x_max, y_max = bbox
+        col_min = _world_to_cell(x_min)
+        row_min = _world_to_cell(y_min)
+        col_max = _world_to_cell(x_max)
+        row_max = _world_to_cell(y_max)
+
+        # Clip
+        clipped = data[row_min : row_max + 1, col_min : col_max + 1]
+
+        # Resample to target_size using simple nearest-neighbor
+        target_rows, target_cols = target_size
+        src_rows, src_cols = clipped.shape
+
+        row_indices = (np.arange(target_rows) * src_rows / target_rows).astype(int)
+        col_indices = (np.arange(target_cols) * src_cols / target_cols).astype(int)
+        row_indices = np.clip(row_indices, 0, src_rows - 1)
+        col_indices = np.clip(col_indices, 0, src_cols - 1)
+
+        return clipped[np.ix_(row_indices, col_indices)]
+
+    def query_individuals_in_bbox(
+        self,
+        version: int,
+        x_min: float,
+        y_min: float,
+        x_max: float,
+        y_max: float,
+    ) -> list[dict]:
+        """Return individuals within a bounding box, alive at the version year."""
+        year = self._version_year(version)
+        # Use a large radius search centered on bbox center, then filter to bbox
+        cx = (x_min + x_max) / 2
+        cy = (y_min + y_max) / 2
+        radius = max(x_max - x_min, y_max - y_min)  # generous radius
+
+        candidates = self._world.events.find_individuals_near(cx, cy, radius, alive_at_year=year)
+
+        # Filter to exact bbox
+        return [
+            ind for ind in candidates if x_min <= ind["x"] <= x_max and y_min <= ind["y"] <= y_max
+        ]
+
+    def get_individual_detail(self, version: int, individual_id: str) -> dict:
+        """Return full details for a distinguished individual at a version.
+
+        Includes derived fields: age (version year minus appeared_year),
+        alive (whether still living at version year), and the species genome.
+        """
+        year = self._version_year(version)
+        ind = self._world.events.get_individual(individual_id)
+        species_info = self._world.events.get_species(ind["species_id"])
+
+        died_year = ind.get("died_year")
+        alive = died_year is None or died_year > year
+        age = year - ind["appeared_year"]
+
+        return {
+            "individual_id": ind["individual_id"],
+            "species_id": ind["species_id"],
+            "x": ind["x"],
+            "y": ind["y"],
+            "appeared_year": ind["appeared_year"],
+            "died_year": died_year,
+            "age": age,
+            "alive": alive,
+            "species_genome": species_info["genome"],
+        }
+
+    def list_species_summary(self, version: int) -> list[dict]:
+        """Return a summary of all species that existed at a given version.
+
+        Each entry includes the species genome, alive/extinct status at the
+        version year, and a count of living individuals.
+        """
+        year = self._version_year(version)
+        species_list = self._world.events.list_species()  # ALL species, not filtered
+
+        # Get all living individuals once for counting
+        all_inds = self._world.events.find_individuals_near(
+            25000, 25000, 50000, alive_at_year=year
+        )
+
+        result: list[dict] = []
+        for sp in species_list:
+            # Only include species that existed at this version
+            sp_info = self._world.events.get_species(sp["species_id"])
+            if sp_info["appeared_year"] > year:
+                continue
+
+            extinct_year = sp_info.get("extinct_year")
+            alive = extinct_year is None or extinct_year > year
+
+            # Count living individuals for this species at this version
+            ind_count = sum(1 for ind in all_inds if ind["species_id"] == sp["species_id"])
+
+            result.append(
+                {
+                    "species_id": sp["species_id"],
+                    "parent_id": sp_info["parent_id"],
+                    "appeared_year": sp_info["appeared_year"],
+                    "extinct_year": extinct_year,
+                    "alive": alive,
+                    "genome": sp_info["genome"],
+                    "individual_count": ind_count,
+                }
+            )
+
+        return result
