@@ -7,20 +7,41 @@
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
-  html, body { margin: 0; padding: 0; height: 100%; }
-  #map { width: 100%; height: 100%; }
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+  #map { position: absolute; top: 0; left: 0; right: 0; bottom: 0; }
+  #map.sidebar-open { right: 340px; }
   .species-dropdown {
     position: absolute; top: 10px; right: 10px; z-index: 1000;
     background: white; padding: 8px 12px; border-radius: 4px;
     box-shadow: 0 1px 5px rgba(0,0,0,0.3); font: 12px/1.5 sans-serif;
   }
   .species-dropdown select { margin-left: 4px; }
+  #sidebar {
+    position: absolute; top: 0; right: 0; width: 340px; height: 100%;
+    background: #fafafa; border-left: 1px solid #ccc;
+    overflow-y: auto; font: 13px/1.5 sans-serif; padding: 12px;
+    box-sizing: border-box; display: none; z-index: 1001;
+  }
+  #sidebar.open { display: block; }
+  #sidebar h3 { margin: 12px 0 4px; font-size: 14px; color: #333; border-bottom: 1px solid #ddd; padding-bottom: 2px; }
+  #sidebar h3:first-child { margin-top: 0; }
+  #sidebar .close-btn { float: right; cursor: pointer; font-size: 18px; color: #888; }
+  #sidebar .close-btn:hover { color: #333; }
+  #sidebar table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+  #sidebar td { padding: 2px 6px; border-bottom: 1px solid #eee; }
+  #sidebar td:first-child { font-weight: 600; color: #555; white-space: nowrap; }
+  #sidebar td:last-child { text-align: right; }
+  #sidebar .empty { color: #999; font-style: italic; }
 </style>
 </head>
 <body>
 <div id="map"></div>
 <div class="species-dropdown" id="species-control" style="display:none">
   <label>Species: <select id="species-select"></select></label>
+</div>
+<div id="sidebar">
+  <span class="close-btn" id="sidebar-close">&times;</span>
+  <div id="sidebar-content"></div>
 </div>
 <script>
 (function () {
@@ -41,7 +62,188 @@
   });
   map.fitBounds(bounds);
 
-  // Helper: create a tile layer for a given tier/layer.
+  // ── Sidebar ──────────────────────────────────────────────────
+
+  var sidebar = document.getElementById("sidebar");
+  var sidebarContent = document.getElementById("sidebar-content");
+  var mapEl = document.getElementById("map");
+  var clickMarker = null;
+
+  function openSidebar(html) {
+    sidebarContent.innerHTML = html;
+    sidebar.classList.add("open");
+    mapEl.classList.add("sidebar-open");
+    map.invalidateSize();
+  }
+
+  function closeSidebar() {
+    sidebar.classList.remove("open");
+    mapEl.classList.remove("sidebar-open");
+    map.invalidateSize();
+    if (clickMarker) { map.removeLayer(clickMarker); clickMarker = null; }
+  }
+
+  document.getElementById("sidebar-close").addEventListener("click", closeSidebar);
+
+  function formatValue(v) {
+    if (typeof v === "number") return v.toFixed(4);
+    return String(v);
+  }
+
+  function renderPointData(data) {
+    var html = "";
+
+    // Coordinates
+    html += "<h3>Location</h3>";
+    html += "<table><tr><td>x</td><td>" + data.x.toFixed(1) + " m</td></tr>";
+    html += "<tr><td>y</td><td>" + data.y.toFixed(1) + " m</td></tr></table>";
+
+    // Rasters grouped by tier
+    var rasters = data.rasters || {};
+    var byTier = {};
+    for (var key in rasters) {
+      var parts = key.split("/");
+      var tier = parts[0], layer = parts.slice(1).join("/");
+      if (!byTier[tier]) byTier[tier] = [];
+      byTier[tier].push({ layer: layer, value: rasters[key] });
+    }
+    for (var t in byTier) {
+      html += "<h3>" + t.replace(/_/g, " ") + "</h3><table>";
+      byTier[t].forEach(function (r) {
+        html += "<tr><td>" + r.layer + "</td><td>" + formatValue(r.value) + "</td></tr>";
+      });
+      html += "</table>";
+    }
+
+    // Species
+    html += "<h3>Species</h3>";
+    var species = data.species || [];
+    if (species.length === 0) {
+      html += '<p class="empty">No species with density &gt; 0</p>';
+    } else {
+      html += "<table>";
+      species.forEach(function (s) {
+        html += "<tr><td>" + s.species_id + "</td><td>" + formatValue(s.density) + "</td></tr>";
+      });
+      html += "</table>";
+    }
+
+    // Individuals
+    html += "<h3>Individuals</h3>";
+    var individuals = data.individuals || [];
+    if (individuals.length === 0) {
+      html += '<p class="empty">None nearby</p>';
+    } else {
+      html += "<table>";
+      individuals.forEach(function (ind) {
+        html += "<tr><td>" + ind.individual_id + "</td><td>" + ind.species_id + "</td></tr>";
+      });
+      html += "</table>";
+    }
+
+    // Events
+    html += "<h3>Events</h3>";
+    var events = data.events || [];
+    if (events.length === 0) {
+      html += '<p class="empty">None nearby</p>';
+    } else {
+      html += "<table>";
+      events.forEach(function (ev) {
+        html += "<tr><td>" + ev.event_type + "</td><td>yr " + formatValue(ev.year) + "</td></tr>";
+      });
+      html += "</table>";
+    }
+
+    return html;
+  }
+
+  // Click handler for point inspection.
+  map.on("click", function (e) {
+    var x = e.latlng.lng;
+    var y = e.latlng.lat;
+
+    // Place/move marker
+    if (clickMarker) { map.removeLayer(clickMarker); }
+    clickMarker = L.circleMarker(e.latlng, { radius: 6, color: "#ff3333", weight: 2 }).addTo(map);
+
+    fetch("/api/world/" + version + "/point?x=" + x + "&y=" + y)
+      .then(function (r) { return r.json(); })
+      .then(function (data) { openSidebar(renderPointData(data)); });
+  });
+
+  // ── Individual markers ────────────────────────────────────────
+
+  var individualLayer = L.layerGroup().addTo(map);
+  var speciesColors = [
+    "#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231",
+    "#911eb4", "#42d4f4", "#f032e6", "#bfef45", "#fabed4",
+    "#469990", "#dcbeff"
+  ];
+  var speciesColorMap = {};
+  var colorIndex = 0;
+
+  function getSpeciesColor(speciesId) {
+    if (!speciesColorMap[speciesId]) {
+      speciesColorMap[speciesId] = speciesColors[colorIndex % speciesColors.length];
+      colorIndex++;
+    }
+    return speciesColorMap[speciesId];
+  }
+
+  function renderIndividualDetail(data) {
+    var html = "<h3>Individual: " + data.individual_id + "</h3><table>";
+    html += "<tr><td>Species</td><td>" + data.species_id + "</td></tr>";
+    html += "<tr><td>Position</td><td>" + data.x.toFixed(1) + ", " + data.y.toFixed(1) + "</td></tr>";
+    html += "<tr><td>Appeared</td><td>yr " + data.appeared_year.toFixed(0) + "</td></tr>";
+    html += "<tr><td>Age</td><td>" + data.age.toFixed(0) + " years</td></tr>";
+    html += "<tr><td>Status</td><td>" + (data.alive ? "alive" : "dead (yr " + (data.died_year || "?") + ")") + "</td></tr>";
+    html += "</table>";
+
+    if (data.species_genome) {
+      html += "<h3>Species genome</h3><table>";
+      for (var trait in data.species_genome) {
+        html += "<tr><td>" + trait + "</td><td>" + formatValue(data.species_genome[trait]) + "</td></tr>";
+      }
+      html += "</table>";
+    }
+    return html;
+  }
+
+  function loadIndividuals() {
+    var b = map.getBounds();
+    var x_min = Math.max(0, b.getWest());
+    var y_min = Math.max(0, b.getSouth());
+    var x_max = Math.min(worldExtent, b.getEast());
+    var y_max = Math.min(worldExtent, b.getNorth());
+
+    fetch("/api/world/" + version + "/individuals?x_min=" + x_min + "&y_min=" + y_min +
+          "&x_max=" + x_max + "&y_max=" + y_max)
+      .then(function (r) { return r.json(); })
+      .then(function (individuals) {
+        individualLayer.clearLayers();
+        individuals.forEach(function (ind) {
+          var color = getSpeciesColor(ind.species_id);
+          var marker = L.circleMarker(L.latLng(ind.y, ind.x), {
+            radius: 5, color: color, fillColor: color, fillOpacity: 0.7, weight: 1
+          });
+          marker.bindTooltip(ind.individual_id, { direction: "top", offset: [0, -6] });
+          marker.on("click", function (e) {
+            L.DomEvent.stopPropagation(e);
+            fetch("/api/world/" + version + "/individual/" + ind.individual_id)
+              .then(function (r) { return r.json(); })
+              .then(function (detail) { openSidebar(renderIndividualDetail(detail)); });
+          });
+          individualLayer.addLayer(marker);
+        });
+      });
+  }
+
+  // Load individuals on map move/zoom and initially.
+  map.on("moveend", loadIndividuals);
+  loadIndividuals();
+
+  // ── Layer controls ───────────────────────────────────────────
+
   function makeTileLayer(tier, layer) {
     return L.tileLayer(
       "/api/world/" + version + "/tiles/" + tier + "/" + layer + "/{z}/{x}/{y}.png",
@@ -49,7 +251,6 @@
     );
   }
 
-  // Fetch metadata and build layer controls dynamically.
   fetch("/api/world/" + version + "/metadata")
     .then(function (r) { return r.json(); })
     .then(function (meta) {
@@ -66,14 +267,12 @@
           var label = tier + " / " + name;
           var tl = makeTileLayer(tier, name);
 
-          // Species density layers go into the dropdown, not the control.
           if (name.match(/^species_.*_density$/)) {
             var sid = name.replace(/^species_/, "").replace(/_density$/, "");
             speciesLayers[sid] = tl;
             continue;
           }
 
-          // Geology layers are base layers (radio buttons); others are overlays.
           if (tier === "geology") {
             baseLayers[label] = tl;
             if (!firstBase) { firstBase = tl; }
@@ -83,20 +282,15 @@
         }
       }
 
-      // Add the default base layer to the map.
       if (firstBase) { firstBase.addTo(map); }
-
-      // Add Leaflet layer control.
       L.control.layers(baseLayers, overlays, { collapsed: false }).addTo(map);
 
-      // Species density dropdown (if any species exist).
       var speciesIds = Object.keys(speciesLayers);
       if (speciesIds.length > 0) {
         var ctrl = document.getElementById("species-control");
         var sel = document.getElementById("species-select");
         ctrl.style.display = "block";
 
-        // "None" option to hide species overlay.
         var noneOpt = document.createElement("option");
         noneOpt.value = "";
         noneOpt.textContent = "(none)";

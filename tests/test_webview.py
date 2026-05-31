@@ -358,3 +358,172 @@ class TestLayerToggle:
             "Index page should contain L.control.layers or a metadata-driven "
             "layer switcher"
         )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Phase 5 — Point Inspection
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestPointInspection:
+    """Phase 5 — click-to-inspect: sidebar shows everything at a map point."""
+
+    def test_point_endpoint_returns_json(self, client):
+        """GET /api/world/0/point?x=1000&y=1000 returns 200 with expected keys."""
+        resp = client.get("/api/world/0/point?x=1000&y=1000")
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert isinstance(data, dict)
+
+        for key in ("x", "y", "rasters", "species", "individuals", "events"):
+            assert key in data, f"Missing key: {key}"
+
+    def test_point_rasters_include_layers(self, client):
+        """The rasters dict should contain geology/heightmap with a numeric value."""
+        resp = client.get("/api/world/0/point?x=1000&y=1000")
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+
+        rasters = data["rasters"]
+        assert isinstance(rasters, dict)
+        assert "geology/heightmap" in rasters
+        assert isinstance(rasters["geology/heightmap"], (int, float))
+
+    def test_point_finds_nearby_individual(self, client):
+        """The fixture places an individual at (1000, 1000); it should appear."""
+        resp = client.get("/api/world/0/point?x=1000&y=1000")
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+
+        individuals = data["individuals"]
+        assert isinstance(individuals, list)
+        assert len(individuals) >= 1
+
+        ids = [ind.get("individual_id", ind.get("id")) for ind in individuals]
+        assert "oak_001" in ids, (
+            f"Expected 'oak_001' in nearby individuals, got {ids}"
+        )
+
+    def test_point_invalid_version(self, client):
+        """GET /api/world/999/point?x=100&y=100 returns 404."""
+        resp = client.get("/api/world/999/point?x=100&y=100")
+        assert resp.status_code == 404
+
+    def test_point_missing_coordinates(self, client):
+        """GET /api/world/0/point with no x/y params returns 400."""
+        resp = client.get("/api/world/0/point")
+        assert resp.status_code == 400
+
+    def test_index_contains_point_inspection(self, client):
+        """GET / body contains evidence of click-to-inspect functionality."""
+        resp = client.get("/")
+
+        assert resp.status_code == 200
+        body = resp.data.decode("utf-8").lower()
+
+        has_inspect = (
+            "click" in body
+            or "sidebar" in body
+            or "inspect" in body
+        )
+        assert has_inspect, (
+            "Index page should contain click-to-inspect functionality "
+            "(expected 'click', 'sidebar', or 'inspect' in the page body)"
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Phase 6 — Individual Markers
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestIndividualMarkers:
+    """Phase 6 — distinguished individuals as Leaflet markers with detail sidebar."""
+
+    def test_individuals_bbox_endpoint(self, client):
+        """GET /api/world/0/individuals with bbox returns 200 and a JSON list."""
+        resp = client.get(
+            "/api/world/0/individuals?x_min=0&y_min=0&x_max=50000&y_max=50000"
+        )
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert isinstance(data, list)
+        assert len(data) >= 1
+
+    def test_individuals_bbox_finds_individual(self, client):
+        """Bbox query covering the fixture individual returns oak_001."""
+        resp = client.get(
+            "/api/world/0/individuals?x_min=0&y_min=0&x_max=50000&y_max=50000"
+        )
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+
+        ids = [ind["individual_id"] for ind in data]
+        assert "oak_001" in ids, (
+            f"Expected 'oak_001' in individuals list, got {ids}"
+        )
+
+    def test_individuals_bbox_empty(self, client):
+        """Bbox query far from any individual returns an empty list."""
+        resp = client.get(
+            "/api/world/0/individuals"
+            "?x_min=49000&y_min=49000&x_max=50000&y_max=50000"
+        )
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert isinstance(data, list)
+        assert len(data) == 0
+
+    def test_individual_detail_endpoint(self, client):
+        """GET /api/world/0/individual/oak_001 returns 200 with expected keys."""
+        resp = client.get("/api/world/0/individual/oak_001")
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert isinstance(data, dict)
+
+        for key in (
+            "individual_id",
+            "species_id",
+            "x",
+            "y",
+            "appeared_year",
+            "age",
+            "alive",
+            "species_genome",
+        ):
+            assert key in data, f"Missing key: {key}"
+
+    def test_individual_detail_not_found(self, client):
+        """GET /api/world/0/individual/nonexistent returns 404."""
+        resp = client.get("/api/world/0/individual/nonexistent")
+        assert resp.status_code == 404
+
+    def test_individual_detail_invalid_version(self, client):
+        """GET /api/world/999/individual/oak_001 returns 404."""
+        resp = client.get("/api/world/999/individual/oak_001")
+        assert resp.status_code == 404
+
+    def test_index_contains_individual_markers(self, client):
+        """GET / body contains evidence of individual marker rendering."""
+        resp = client.get("/")
+
+        assert resp.status_code == 200
+        body = resp.data.decode("utf-8").lower()
+
+        has_markers = (
+            "circlemarker" in body
+            or "individuals" in body
+            or "individual" in body
+        )
+        assert has_markers, (
+            "Index page should contain individual marker rendering "
+            "(expected 'circleMarker', 'individuals', or 'individual' "
+            "in the page body)"
+        )

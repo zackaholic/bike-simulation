@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from flask import Flask, Response, jsonify, render_template
+from flask import Flask, Response, jsonify, render_template, request
 
 from bike_sim.extract.webview.tiles import MAX_ZOOM, render_tile, tile_valid
 from bike_sim.query.world_query import WorldQuery
@@ -61,6 +61,58 @@ def create_app(world_dir: str | Path) -> Flask:
         except KeyError:
             return jsonify({"error": f"Version {version} not found"}), 404
         return jsonify(meta)
+
+    # ── Point inspection ─────────────────────────────────────────
+
+    @app.route("/api/world/<int:version>/point")
+    def api_point(version: int):
+        try:
+            world.get_version(version)
+        except KeyError:
+            return jsonify({"error": f"Version {version} not found"}), 404
+
+        x_str = request.args.get("x")
+        y_str = request.args.get("y")
+        if x_str is None or y_str is None:
+            return jsonify({"error": "Missing required parameters: x, y"}), 400
+
+        try:
+            x = float(x_str)
+            y = float(y_str)
+        except ValueError:
+            return jsonify({"error": "x and y must be numbers"}), 400
+
+        return jsonify(query.query_point(version, x, y))
+
+    # ── Individual routes ──────────────────────────────────────────
+
+    @app.route("/api/world/<int:version>/individuals")
+    def api_individuals(version: int):
+        try:
+            world.get_version(version)
+        except KeyError:
+            return jsonify({"error": f"Version {version} not found"}), 404
+
+        x_min = float(request.args.get("x_min", 0))
+        y_min = float(request.args.get("y_min", 0))
+        x_max = float(request.args.get("x_max", WORLD_EXTENT))
+        y_max = float(request.args.get("y_max", WORLD_EXTENT))
+
+        return jsonify(query.query_individuals_in_bbox(version, x_min, y_min, x_max, y_max))
+
+    @app.route("/api/world/<int:version>/individual/<individual_id>")
+    def api_individual_detail(version: int, individual_id: str):
+        try:
+            world.get_version(version)
+        except KeyError:
+            return jsonify({"error": f"Version {version} not found"}), 404
+
+        try:
+            detail = query.get_individual_detail(version, individual_id)
+        except (KeyError, TypeError):
+            return jsonify({"error": f"Individual {individual_id} not found"}), 404
+
+        return jsonify(detail)
 
     # ── Tile routes ───────────────────────────────────────────────
 
