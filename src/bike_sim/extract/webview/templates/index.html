@@ -9,14 +9,25 @@
 <style>
   html, body { margin: 0; padding: 0; height: 100%; }
   #map { width: 100%; height: 100%; }
+  .species-dropdown {
+    position: absolute; top: 10px; right: 10px; z-index: 1000;
+    background: white; padding: 8px 12px; border-radius: 4px;
+    box-shadow: 0 1px 5px rgba(0,0,0,0.3); font: 12px/1.5 sans-serif;
+  }
+  .species-dropdown select { margin-left: 4px; }
 </style>
 </head>
 <body>
 <div id="map"></div>
+<div class="species-dropdown" id="species-control" style="display:none">
+  <label>Species: <select id="species-select"></select></label>
+</div>
 <script>
 (function () {
-  // World is 50000m x 50000m. L.CRS.Simple uses pixels = meters here.
   var worldExtent = {{ world_extent }};
+  var maxZoom = {{ max_zoom }};
+  var version = {{ current_version }};
+
   var bounds = L.latLngBounds(
     L.latLng(0, 0),
     L.latLng(worldExtent, worldExtent)
@@ -25,25 +36,93 @@
   var map = L.map("map", {
     crs: L.CRS.Simple,
     minZoom: 0,
-    maxZoom: {{ max_zoom }},
+    maxZoom: maxZoom,
     maxBounds: bounds.pad(0.1)
   });
-
   map.fitBounds(bounds);
 
-  // Tile layer pointing at our tile endpoint.
-  var version = {{ current_version }};
-  var tier = "geology";
-  var layer = "heightmap";
+  // Helper: create a tile layer for a given tier/layer.
+  function makeTileLayer(tier, layer) {
+    return L.tileLayer(
+      "/api/world/" + version + "/tiles/" + tier + "/" + layer + "/{z}/{x}/{y}.png",
+      { tileSize: 256, bounds: bounds, minZoom: 0, maxZoom: maxZoom, noWrap: true, tms: true }
+    );
+  }
 
-  L.tileLayer("/api/world/" + version + "/tiles/" + tier + "/" + layer + "/{z}/{x}/{y}.png", {
-    tileSize: 256,
-    bounds: bounds,
-    minZoom: 0,
-    maxZoom: {{ max_zoom }},
-    noWrap: true,
-    tms: true
-  }).addTo(map);
+  // Fetch metadata and build layer controls dynamically.
+  fetch("/api/world/" + version + "/metadata")
+    .then(function (r) { return r.json(); })
+    .then(function (meta) {
+      var baseLayers = {};
+      var overlays = {};
+      var speciesLayers = {};
+      var firstBase = null;
+
+      var layers = meta.layers;
+      for (var tier in layers) {
+        var names = layers[tier];
+        for (var i = 0; i < names.length; i++) {
+          var name = names[i];
+          var label = tier + " / " + name;
+          var tl = makeTileLayer(tier, name);
+
+          // Species density layers go into the dropdown, not the control.
+          if (name.match(/^species_.*_density$/)) {
+            var sid = name.replace(/^species_/, "").replace(/_density$/, "");
+            speciesLayers[sid] = tl;
+            continue;
+          }
+
+          // Geology layers are base layers (radio buttons); others are overlays.
+          if (tier === "geology") {
+            baseLayers[label] = tl;
+            if (!firstBase) { firstBase = tl; }
+          } else {
+            overlays[label] = tl;
+          }
+        }
+      }
+
+      // Add the default base layer to the map.
+      if (firstBase) { firstBase.addTo(map); }
+
+      // Add Leaflet layer control.
+      L.control.layers(baseLayers, overlays, { collapsed: false }).addTo(map);
+
+      // Species density dropdown (if any species exist).
+      var speciesIds = Object.keys(speciesLayers);
+      if (speciesIds.length > 0) {
+        var ctrl = document.getElementById("species-control");
+        var sel = document.getElementById("species-select");
+        ctrl.style.display = "block";
+
+        // "None" option to hide species overlay.
+        var noneOpt = document.createElement("option");
+        noneOpt.value = "";
+        noneOpt.textContent = "(none)";
+        sel.appendChild(noneOpt);
+
+        speciesIds.sort();
+        for (var s = 0; s < speciesIds.length; s++) {
+          var opt = document.createElement("option");
+          opt.value = speciesIds[s];
+          opt.textContent = speciesIds[s];
+          sel.appendChild(opt);
+        }
+
+        var activeSpeciesLayer = null;
+        sel.addEventListener("change", function () {
+          if (activeSpeciesLayer) { map.removeLayer(activeSpeciesLayer); }
+          var sid = sel.value;
+          if (sid && speciesLayers[sid]) {
+            activeSpeciesLayer = speciesLayers[sid];
+            activeSpeciesLayer.addTo(map);
+          } else {
+            activeSpeciesLayer = null;
+          }
+        });
+      }
+    });
 })();
 </script>
 </body>

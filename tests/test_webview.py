@@ -219,3 +219,142 @@ class TestLeafletMap:
 
         assert "/api/world/" in body, "Map page should reference /api/world/ tile path"
         assert "/tiles/" in body, "Map page should reference /tiles/ in the tile URL"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Phase 4 — Layer Toggle
+# ═══════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture()
+def world_dir_multi_layer(tmp_path):
+    """Create a world with raster layers across all three tiers.
+
+    Extends the single-layer pattern with:
+    - geology/heightmap (continuous)
+    - geology/bedrock_type (categorical integers 0-5)
+    - climate_hydrology/temperature (continuous)
+    """
+    world_path = tmp_path / "test_world_multi"
+    world = World.create(world_path, seed=42)
+    rng = np.random.default_rng(42)
+
+    world.rasters.set_version(0)
+
+    # Geology layers
+    heightmap = rng.random((GRID_SIZE, GRID_SIZE))
+    world.rasters.write_layer("geology", "heightmap", heightmap, tick_number=0)
+
+    bedrock = rng.integers(0, 6, size=(GRID_SIZE, GRID_SIZE)).astype(np.float64)
+    world.rasters.write_layer("geology", "bedrock_type", bedrock, tick_number=0)
+
+    # Climate-hydrology layer
+    temperature = rng.uniform(-10.0, 35.0, size=(GRID_SIZE, GRID_SIZE))
+    world.rasters.write_layer(
+        "climate_hydrology", "temperature", temperature, tick_number=0
+    )
+
+    # Register a species so commit succeeds with valid ecology state.
+    world.events.add_species("oak", genome={"height": 25.0}, appeared_year=0.0)
+    world.events.add_individual(
+        "oak_001", "oak", x=1000.0, y=1000.0, appeared_year=0.0
+    )
+
+    world.commit_version(trigger="multi-layer test setup")
+    world.save(world_path / "world.json")
+    world.close()
+
+    return world_path
+
+
+@pytest.fixture()
+def multi_client(world_dir_multi_layer):
+    """Create a Flask test client backed by the multi-layer test world."""
+    from bike_sim.extract.webview.app import create_app
+
+    app = create_app(world_dir_multi_layer)
+    app.config["TESTING"] = True
+    with app.test_client() as c:
+        yield c
+
+
+class TestLayerToggle:
+    """Phase 4 — layer switching: base layers, overlays, and layer control UI."""
+
+    def test_metadata_includes_all_tiers(self, multi_client):
+        """Metadata endpoint returns layers grouped by all three simulation tiers.
+
+        Even if a tier has no layers, its key should be present so the
+        frontend can build a complete layer control.
+        """
+        resp = multi_client.get("/api/world/0/metadata")
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+
+        layers = data["layers"]
+        assert isinstance(layers, dict)
+
+        # All three tiers must be present as top-level keys.
+        for tier in ("geology", "climate_hydrology", "ecology"):
+            assert tier in layers, f"Missing tier key: {tier}"
+            assert isinstance(layers[tier], list)
+
+        # Geology should have both layers we wrote.
+        assert "heightmap" in layers["geology"]
+        assert "bedrock_type" in layers["geology"]
+
+        # Climate-hydrology should have temperature.
+        assert "temperature" in layers["climate_hydrology"]
+
+        # Ecology may be empty (no density rasters written), but key exists.
+        assert isinstance(layers["ecology"], list)
+
+    def test_tiles_for_different_layers(self, multi_client):
+        """Tiles can be fetched for layers across different tiers.
+
+        Verifies that the tile endpoint serves valid PNGs for geology/heightmap,
+        geology/bedrock_type, and climate_hydrology/temperature.
+        """
+        import io
+
+        from PIL import Image
+
+        layer_paths = [
+            "geology/heightmap",
+            "geology/bedrock_type",
+            "climate_hydrology/temperature",
+        ]
+
+        for layer_path in layer_paths:
+            url = f"/api/world/0/tiles/{layer_path}/0/0/0.png"
+            resp = multi_client.get(url)
+
+            assert resp.status_code == 200, f"Expected 200 for {layer_path}, got {resp.status_code}"
+            assert resp.content_type == "image/png"
+
+            img = Image.open(io.BytesIO(resp.data))
+            assert img.size == (256, 256), f"Tile for {layer_path} should be 256x256"
+
+    def test_index_contains_layer_control(self, multi_client):
+        """GET / includes Leaflet layer control for switching between layers.
+
+        The index page should contain evidence of L.control.layers or the
+        metadata-driven layer switching mechanism.
+        """
+        resp = multi_client.get("/")
+
+        assert resp.status_code == 200
+        body = resp.data.decode("utf-8")
+
+        # The page should contain layer control setup — either the Leaflet
+        # built-in control or a custom layer switcher referencing the metadata.
+        has_layer_control = (
+            "L.control.layers" in body
+            or "control.layers" in body.lower()
+            or "/api/world/" in body and "metadata" in body
+        )
+        assert has_layer_control, (
+            "Index page should contain L.control.layers or a metadata-driven "
+            "layer switcher"
+        )
