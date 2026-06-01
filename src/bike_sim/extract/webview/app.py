@@ -109,7 +109,7 @@ def create_app(world_dir: str | Path) -> Flask:
 
         try:
             detail = query.get_individual_detail(version, individual_id)
-        except (KeyError, TypeError):
+        except KeyError:
             return jsonify({"error": f"Individual {individual_id} not found"}), 404
 
         return jsonify(detail)

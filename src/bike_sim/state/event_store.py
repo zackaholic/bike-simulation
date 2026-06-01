@@ -72,10 +72,15 @@ class EventStore:
         self._conn.commit()
 
     def get_species(self, species_id: str) -> dict:
-        """Look up a species by ID."""
+        """Look up a species by ID.
+
+        Raises KeyError if the species does not exist.
+        """
         row = self._conn.execute(
             "SELECT * FROM species WHERE species_id = ?", (species_id,)
         ).fetchone()
+        if row is None:
+            raise KeyError(f"Species {species_id!r} not found")
         return {
             "species_id": row["species_id"],
             "genome": json.loads(row["genome_json"]),
@@ -136,10 +141,15 @@ class EventStore:
         self._conn.commit()
 
     def get_individual(self, individual_id: str) -> dict:
-        """Look up an individual by ID."""
+        """Look up an individual by ID.
+
+        Raises KeyError if the individual does not exist.
+        """
         row = self._conn.execute(
             "SELECT * FROM individuals WHERE individual_id = ?", (individual_id,)
         ).fetchone()
+        if row is None:
+            raise KeyError(f"Individual {individual_id!r} not found")
         return {
             "individual_id": row["individual_id"],
             "species_id": row["species_id"],
