@@ -34,7 +34,7 @@ class EventStore:
     @classmethod
     def create(cls, path: Path) -> EventStore:
         """Create a new EventStore database at the given path."""
-        conn = sqlite3.connect(str(path))
+        conn = sqlite3.connect(str(path), check_same_thread=False)
         conn.row_factory = sqlite3.Row
         store = cls(conn)
         store._create_tables()
@@ -44,7 +44,7 @@ class EventStore:
     @classmethod
     def open(cls, path: Path) -> EventStore:
         """Open an existing EventStore database."""
-        conn = sqlite3.connect(str(path))
+        conn = sqlite3.connect(str(path), check_same_thread=False)
         conn.row_factory = sqlite3.Row
         store = cls(conn)
         store._migrate()
