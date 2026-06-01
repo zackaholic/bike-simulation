@@ -10,6 +10,14 @@
   html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
   #map { position: absolute; top: 0; left: 0; right: 0; bottom: 0; }
   #map.sidebar-open { right: 340px; }
+  #toolbar {
+    position: absolute; top: 10px; left: 60px; z-index: 1000;
+    background: white; padding: 6px 12px; border-radius: 4px;
+    box-shadow: 0 1px 5px rgba(0,0,0,0.3); font: 12px/1.5 sans-serif;
+    display: flex; gap: 12px; align-items: center;
+  }
+  #toolbar label { font-weight: 600; color: #333; }
+  #toolbar select { font-size: 12px; }
   .species-dropdown {
     position: absolute; top: 10px; right: 10px; z-index: 1000;
     background: white; padding: 8px 12px; border-radius: 4px;
@@ -36,6 +44,9 @@
 </head>
 <body>
 <div id="map"></div>
+<div id="toolbar">
+  <label>Version: <select id="version-select"></select></label>
+</div>
 <div class="species-dropdown" id="species-control" style="display:none">
   <label>Species: <select id="species-select"></select></label>
 </div>
@@ -47,7 +58,33 @@
 (function () {
   var worldExtent = {{ world_extent }};
   var maxZoom = {{ max_zoom }};
-  var version = {{ current_version }};
+  var defaultVersion = {{ current_version }};
+
+  // ── URL hash state ──────────────────────────────────────────
+
+  function parseHash() {
+    var params = {};
+    var hash = location.hash.replace(/^#/, "");
+    if (!hash) return params;
+    hash.split("&").forEach(function (part) {
+      var kv = part.split("=");
+      if (kv.length === 2) params[kv[0]] = kv[1];
+    });
+    return params;
+  }
+
+  function updateHash(params) {
+    var parts = [];
+    for (var k in params) {
+      parts.push(k + "=" + params[k]);
+    }
+    history.replaceState(null, "", "#" + parts.join("&"));
+  }
+
+  var hashState = parseHash();
+  var version = hashState.version !== undefined ? parseInt(hashState.version, 10) : defaultVersion;
+
+  // ── Map setup ───────────────────────────────────────────────
 
   var bounds = L.latLngBounds(
     L.latLng(0, 0),
@@ -60,9 +97,29 @@
     maxZoom: maxZoom,
     maxBounds: bounds.pad(0.1)
   });
-  map.fitBounds(bounds);
 
-  // ── Sidebar ──────────────────────────────────────────────────
+  // Restore view from hash or fit bounds.
+  if (hashState.lat && hashState.lng && hashState.z) {
+    map.setView(
+      L.latLng(parseFloat(hashState.lat), parseFloat(hashState.lng)),
+      parseInt(hashState.z, 10)
+    );
+  } else {
+    map.fitBounds(bounds);
+  }
+
+  // Save map position to hash on move.
+  map.on("moveend", function () {
+    var c = map.getCenter();
+    var h = parseHash();
+    h.version = version;
+    h.z = map.getZoom();
+    h.lat = c.lat.toFixed(0);
+    h.lng = c.lng.toFixed(0);
+    updateHash(h);
+  });
+
+  // ── Sidebar ─────────────────────────────────────────────────
 
   var sidebar = document.getElementById("sidebar");
   var sidebarContent = document.getElementById("sidebar-content");
@@ -92,13 +149,10 @@
 
   function renderPointData(data) {
     var html = "";
-
-    // Coordinates
     html += "<h3>Location</h3>";
     html += "<table><tr><td>x</td><td>" + data.x.toFixed(1) + " m</td></tr>";
     html += "<tr><td>y</td><td>" + data.y.toFixed(1) + " m</td></tr></table>";
 
-    // Rasters grouped by tier
     var rasters = data.rasters || {};
     var byTier = {};
     for (var key in rasters) {
@@ -115,7 +169,6 @@
       html += "</table>";
     }
 
-    // Species
     html += "<h3>Species</h3>";
     var species = data.species || [];
     if (species.length === 0) {
@@ -128,7 +181,6 @@
       html += "</table>";
     }
 
-    // Individuals
     html += "<h3>Individuals</h3>";
     var individuals = data.individuals || [];
     if (individuals.length === 0) {
@@ -141,7 +193,6 @@
       html += "</table>";
     }
 
-    // Events
     html += "<h3>Events</h3>";
     var events = data.events || [];
     if (events.length === 0) {
@@ -162,7 +213,6 @@
     var x = e.latlng.lng;
     var y = e.latlng.lat;
 
-    // Place/move marker
     if (clickMarker) { map.removeLayer(clickMarker); }
     clickMarker = L.circleMarker(e.latlng, { radius: 6, color: "#ff3333", weight: 2 }).addTo(map);
 
@@ -171,7 +221,7 @@
       .then(function (data) { openSidebar(renderPointData(data)); });
   });
 
-  // ── Individual markers ────────────────────────────────────────
+  // ── Individual markers ──────────────────────────────────────
 
   var individualLayer = L.layerGroup().addTo(map);
   var speciesColors = [
@@ -238,11 +288,14 @@
       });
   }
 
-  // Load individuals on map move/zoom and initially.
   map.on("moveend", loadIndividuals);
   loadIndividuals();
 
-  // ── Layer controls ───────────────────────────────────────────
+  // ── Layer controls ──────────────────────────────────────────
+
+  var layerControl = null;
+  var activeTileLayers = [];
+  var activeSpeciesLayer = null;
 
   function makeTileLayer(tier, layer) {
     return L.tileLayer(
@@ -251,72 +304,145 @@
     );
   }
 
-  fetch("/api/world/" + version + "/metadata")
-    .then(function (r) { return r.json(); })
-    .then(function (meta) {
-      var baseLayers = {};
-      var overlays = {};
-      var speciesLayers = {};
-      var firstBase = null;
+  function buildLayers() {
+    // Remove old layers and control.
+    activeTileLayers.forEach(function (tl) { map.removeLayer(tl); });
+    activeTileLayers = [];
+    if (activeSpeciesLayer) { map.removeLayer(activeSpeciesLayer); activeSpeciesLayer = null; }
+    if (layerControl) { map.removeControl(layerControl); layerControl = null; }
 
-      var layers = meta.layers;
-      for (var tier in layers) {
-        var names = layers[tier];
-        for (var i = 0; i < names.length; i++) {
-          var name = names[i];
-          var label = tier + " / " + name;
-          var tl = makeTileLayer(tier, name);
+    // Reset species dropdown.
+    var speciesCtrl = document.getElementById("species-control");
+    var speciesSel = document.getElementById("species-select");
+    speciesCtrl.style.display = "none";
+    speciesSel.innerHTML = "";
 
-          if (name.match(/^species_.*_density$/)) {
-            var sid = name.replace(/^species_/, "").replace(/_density$/, "");
-            speciesLayers[sid] = tl;
-            continue;
-          }
+    fetch("/api/world/" + version + "/metadata")
+      .then(function (r) { return r.json(); })
+      .then(function (meta) {
+        var baseLayers = {};
+        var overlays = {};
+        var speciesLayers = {};
+        var firstBase = null;
 
-          if (tier === "geology") {
-            baseLayers[label] = tl;
-            if (!firstBase) { firstBase = tl; }
-          } else {
-            overlays[label] = tl;
+        var layers = meta.layers;
+        for (var tier in layers) {
+          var names = layers[tier];
+          for (var i = 0; i < names.length; i++) {
+            var name = names[i];
+            var label = tier + " / " + name;
+            var tl = makeTileLayer(tier, name);
+
+            if (name.match(/^species_.*_density$/)) {
+              var sid = name.replace(/^species_/, "").replace(/_density$/, "");
+              speciesLayers[sid] = tl;
+              continue;
+            }
+
+            if (tier === "geology") {
+              baseLayers[label] = tl;
+              if (!firstBase) { firstBase = tl; }
+            } else {
+              overlays[label] = tl;
+            }
           }
         }
-      }
 
-      if (firstBase) { firstBase.addTo(map); }
-      L.control.layers(baseLayers, overlays, { collapsed: false }).addTo(map);
+        if (firstBase) { firstBase.addTo(map); activeTileLayers.push(firstBase); }
+        layerControl = L.control.layers(baseLayers, overlays, { collapsed: false }).addTo(map);
 
-      var speciesIds = Object.keys(speciesLayers);
-      if (speciesIds.length > 0) {
-        var ctrl = document.getElementById("species-control");
-        var sel = document.getElementById("species-select");
-        ctrl.style.display = "block";
-
-        var noneOpt = document.createElement("option");
-        noneOpt.value = "";
-        noneOpt.textContent = "(none)";
-        sel.appendChild(noneOpt);
-
-        speciesIds.sort();
-        for (var s = 0; s < speciesIds.length; s++) {
-          var opt = document.createElement("option");
-          opt.value = speciesIds[s];
-          opt.textContent = speciesIds[s];
-          sel.appendChild(opt);
-        }
-
-        var activeSpeciesLayer = null;
-        sel.addEventListener("change", function () {
-          if (activeSpeciesLayer) { map.removeLayer(activeSpeciesLayer); }
-          var sid = sel.value;
-          if (sid && speciesLayers[sid]) {
-            activeSpeciesLayer = speciesLayers[sid];
-            activeSpeciesLayer.addTo(map);
-          } else {
-            activeSpeciesLayer = null;
-          }
+        // Track overlay additions/removals.
+        map.on("overlayadd", function (e) { activeTileLayers.push(e.layer); });
+        map.on("overlayremove", function (e) {
+          var idx = activeTileLayers.indexOf(e.layer);
+          if (idx >= 0) activeTileLayers.splice(idx, 1);
         });
-      }
+        map.on("baselayerchange", function (e) {
+          // Replace the base layer in tracking.
+          activeTileLayers = activeTileLayers.filter(function (l) {
+            for (var k in baseLayers) { if (baseLayers[k] === l) return false; }
+            return true;
+          });
+          activeTileLayers.push(e.layer);
+        });
+
+        // Species dropdown.
+        var speciesIds = Object.keys(speciesLayers);
+        if (speciesIds.length > 0) {
+          speciesCtrl.style.display = "block";
+          var noneOpt = document.createElement("option");
+          noneOpt.value = "";
+          noneOpt.textContent = "(none)";
+          speciesSel.appendChild(noneOpt);
+
+          speciesIds.sort();
+          for (var s = 0; s < speciesIds.length; s++) {
+            var opt = document.createElement("option");
+            opt.value = speciesIds[s];
+            opt.textContent = speciesIds[s];
+            speciesSel.appendChild(opt);
+          }
+
+          speciesSel.onchange = function () {
+            if (activeSpeciesLayer) { map.removeLayer(activeSpeciesLayer); }
+            var sid = speciesSel.value;
+            if (sid && speciesLayers[sid]) {
+              activeSpeciesLayer = speciesLayers[sid];
+              activeSpeciesLayer.addTo(map);
+            } else {
+              activeSpeciesLayer = null;
+            }
+          };
+        }
+      });
+  }
+
+  buildLayers();
+
+  // ── Version picker ──────────────────────────────────────────
+
+  var versionSelect = document.getElementById("version-select");
+
+  fetch("/api/versions")
+    .then(function (r) { return r.json(); })
+    .then(function (versions) {
+      versions.forEach(function (v) {
+        var opt = document.createElement("option");
+        opt.value = v.version_id;
+        var yr = "";
+        if (v.tier_clocks && v.tier_clocks.ecology) {
+          yr = " (yr " + (v.tier_clocks.ecology.simulated_year || 0).toFixed(0) + ")";
+        }
+        opt.textContent = "v" + v.version_id + yr + " — " + v.trigger;
+        if (v.version_id === version) opt.selected = true;
+        versionSelect.appendChild(opt);
+      });
     });
+
+  versionSelect.addEventListener("change", function () {
+    version = parseInt(versionSelect.value, 10);
+    var h = parseHash();
+    h.version = version;
+    updateHash(h);
+    closeSidebar();
+    buildLayers();
+    loadIndividuals();
+  });
+
+  // Restore version from hash on back/forward navigation.
+  window.addEventListener("hashchange", function () {
+    var h = parseHash();
+    if (h.version !== undefined) {
+      var newVersion = parseInt(h.version, 10);
+      if (newVersion !== version) {
+        version = newVersion;
+        versionSelect.value = version;
+        closeSidebar();
+        buildLayers();
+        loadIndividuals();
+      }
+    }
+  });
 })();
 </script>
 </body>

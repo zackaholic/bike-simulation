@@ -527,3 +527,152 @@ class TestIndividualMarkers:
             "(expected 'circleMarker', 'individuals', or 'individual' "
             "in the page body)"
         )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Phase 7 — Version Picker
+# ═══════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture()
+def world_dir_two_versions(tmp_path):
+    """Create a world with two committed versions and return its path.
+
+    Version 0: heightmap raster + species/individual.
+    Version 1: adds a bedrock_type raster layer.
+    """
+    world_path = tmp_path / "test_world_two_versions"
+    world = World.create(world_path, seed=42)
+    rng = np.random.default_rng(42)
+
+    # ── Version 0: heightmap + ecology ────────────────────────────
+    world.rasters.set_version(0)
+    heightmap = rng.random((GRID_SIZE, GRID_SIZE))
+    world.rasters.write_layer("geology", "heightmap", heightmap, tick_number=0)
+
+    world.events.add_species("oak", genome={"height": 25.0}, appeared_year=0.0)
+    world.events.add_individual(
+        "oak_001", "oak", x=1000.0, y=1000.0, appeared_year=0.0
+    )
+
+    world.commit_version(trigger="initial setup")
+
+    # ── Version 1: add bedrock_type ───────────────────────────────
+    world.rasters.set_version(1)
+    bedrock = rng.integers(0, 6, size=(GRID_SIZE, GRID_SIZE)).astype(np.float64)
+    world.rasters.write_layer("geology", "bedrock_type", bedrock, tick_number=1)
+
+    world.commit_version(trigger="geology advance")
+
+    world.save(world_path / "world.json")
+    world.close()
+
+    return world_path
+
+
+@pytest.fixture()
+def two_version_client(world_dir_two_versions):
+    """Create a Flask test client backed by the two-version test world."""
+    from bike_sim.extract.webview.app import create_app
+
+    app = create_app(world_dir_two_versions)
+    app.config["TESTING"] = True
+    with app.test_client() as c:
+        yield c
+
+
+class TestVersionPicker:
+    """Phase 7 — version picker dropdown and URL state encoding."""
+
+    def test_versions_endpoint_has_metadata(self, client):
+        """GET /api/versions returns entries with version_id, trigger, and
+        tier_clocks; tier_clocks is a dict with tier names as keys."""
+        resp = client.get("/api/versions")
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert isinstance(data, list)
+        assert len(data) >= 1
+
+        entry = data[0]
+        assert "version_id" in entry
+        assert "trigger" in entry
+        assert "tier_clocks" in entry
+
+        tier_clocks = entry["tier_clocks"]
+        assert isinstance(tier_clocks, dict), (
+            f"tier_clocks should be a dict, got {type(tier_clocks).__name__}"
+        )
+
+        # Tier clock keys should be recognisable tier names (strings).
+        for key in tier_clocks:
+            assert isinstance(key, str), (
+                f"tier_clocks keys should be strings, got {type(key).__name__}"
+            )
+
+    def test_index_contains_version_picker(self, client):
+        """GET / body contains evidence of a version picker UI element."""
+        resp = client.get("/")
+
+        assert resp.status_code == 200
+        body = resp.data.decode("utf-8").lower()
+
+        has_version_picker = (
+            "version-select" in body
+            or "version-picker" in body
+            or ("select" in body and "version" in body)
+        )
+        assert has_version_picker, (
+            "Index page should contain a version picker "
+            "(expected 'version-select', 'version-picker', or "
+            "'select' + 'version' in the page body)"
+        )
+
+    def test_index_contains_url_state(self, client):
+        """GET / body contains evidence of URL hash state management."""
+        resp = client.get("/")
+
+        assert resp.status_code == 200
+        body = resp.data.decode("utf-8")
+
+        has_url_state = (
+            "location.hash" in body
+            or "hashchange" in body
+            or "pushState" in body
+        )
+        assert has_url_state, (
+            "Index page should contain URL hash state management "
+            "(expected 'location.hash', 'hashchange', or 'pushState' "
+            "in the page body)"
+        )
+
+    def test_multi_version_world(self, two_version_client):
+        """A world with two committed versions exposes both via /api/versions,
+        and metadata can be fetched for each."""
+        # ── Verify /api/versions returns 2 entries ────────────────
+        resp = two_version_client.get("/api/versions")
+
+        assert resp.status_code == 200
+        versions = resp.get_json()
+        assert isinstance(versions, list)
+        assert len(versions) == 2, (
+            f"Expected 2 versions, got {len(versions)}"
+        )
+
+        version_ids = [v["version_id"] for v in versions]
+        assert 0 in version_ids
+        assert 1 in version_ids
+
+        # ── Verify metadata for version 0 ────────────────────────
+        resp_v0 = two_version_client.get("/api/world/0/metadata")
+        assert resp_v0.status_code == 200
+        meta_v0 = resp_v0.get_json()
+        assert isinstance(meta_v0, dict)
+        assert "layers" in meta_v0
+
+        # ── Verify metadata for version 1 ────────────────────────
+        resp_v1 = two_version_client.get("/api/world/1/metadata")
+        assert resp_v1.status_code == 200
+        meta_v1 = resp_v1.get_json()
+        assert isinstance(meta_v1, dict)
+        assert "layers" in meta_v1
