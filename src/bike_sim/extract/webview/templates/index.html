@@ -312,10 +312,10 @@
   var activeTileLayers = [];
   var activeSpeciesLayer = null;
 
-  function makeTileLayer(tier, layer) {
+  function makeTileLayer(tier, layer, isOverlay) {
     return L.tileLayer(
       "/api/world/" + version + "/tiles/" + tier + "/" + layer + "/{z}/{x}/{y}.png",
-      { tileSize: 256, bounds: bounds, minZoom: 0, maxZoom: maxZoom, noWrap: true }
+      { tileSize: 256, bounds: bounds, minZoom: 0, maxZoom: maxZoom, noWrap: true, opacity: isOverlay ? 0.6 : 1.0 }
     );
   }
 
@@ -355,12 +355,13 @@
             // Species density → dropdown.
             if (name.match(/^species_.*_density$/)) {
               var sid = name.replace(/^species_/, "").replace(/_density$/, "");
-              speciesLayers[sid] = makeTileLayer(tier, name);
+              speciesLayers[sid] = makeTileLayer(tier, name, true);
               continue;
             }
 
             var label = tier + " / " + name;
-            var tl = makeTileLayer(tier, name);
+            var isOverlay = tier !== "geology";
+            var tl = makeTileLayer(tier, name, isOverlay);
 
             if (tier === "geology") {
               baseLayers[label] = tl;
