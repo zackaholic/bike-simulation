@@ -112,6 +112,10 @@
     maxBounds: bounds.pad(0.1)
   });
 
+  // Custom panes so geology always renders below overlays.
+  map.createPane("basePane").style.zIndex = 200;
+  map.createPane("overlayPane").style.zIndex = 400;
+
   if (hashState.lat && hashState.lng && hashState.z) {
     map.setView(
       L.latLng(parseFloat(hashState.lat), parseFloat(hashState.lng)),
@@ -315,7 +319,8 @@
   function makeTileLayer(tier, layer, isOverlay) {
     return L.tileLayer(
       "/api/world/" + version + "/tiles/" + tier + "/" + layer + "/{z}/{x}/{y}.png",
-      { tileSize: 256, bounds: bounds, minZoom: 0, maxZoom: maxZoom, noWrap: true, opacity: isOverlay ? 0.6 : 1.0 }
+      { tileSize: 256, bounds: bounds, minZoom: 0, maxZoom: maxZoom, noWrap: true,
+        opacity: isOverlay ? 0.6 : 1.0, pane: isOverlay ? "overlayPane" : "basePane" }
     );
   }
 
@@ -338,10 +343,8 @@
     fetch("/api/world/" + version + "/metadata")
       .then(function (r) { return r.json(); })
       .then(function (meta) {
-        var baseLayers = {};
         var overlays = {};
         var speciesLayers = {};
-        var firstBase = null;
 
         var layers = meta.layers;
         for (var tier in layers) {
@@ -360,32 +363,26 @@
             }
 
             var label = tier + " / " + name;
-            var isOverlay = tier !== "geology";
-            var tl = makeTileLayer(tier, name, isOverlay);
+            var tl = makeTileLayer(tier, name, tier !== "geology");
+            overlays[label] = tl;
 
-            if (tier === "geology") {
-              baseLayers[label] = tl;
-              if (!firstBase) { firstBase = tl; }
-            } else {
-              overlays[label] = tl;
+            // Default: heightmap on.
+            if (name === "heightmap") {
+              tl.addTo(map);
+              activeTileLayers.push(tl);
             }
           }
         }
 
-        if (firstBase) { firstBase.addTo(map); activeTileLayers.push(firstBase); }
-        layerControl = L.control.layers(baseLayers, overlays, { collapsed: false }).addTo(map);
+        // Individuals toggle.
+        overlays["individuals"] = individualLayer;
+
+        layerControl = L.control.layers(null, overlays, { collapsed: false }).addTo(map);
 
         map.on("overlayadd", function (e) { activeTileLayers.push(e.layer); });
         map.on("overlayremove", function (e) {
           var idx = activeTileLayers.indexOf(e.layer);
           if (idx >= 0) activeTileLayers.splice(idx, 1);
-        });
-        map.on("baselayerchange", function (e) {
-          activeTileLayers = activeTileLayers.filter(function (l) {
-            for (var k in baseLayers) { if (baseLayers[k] === l) return false; }
-            return true;
-          });
-          activeTileLayers.push(e.layer);
         });
 
         var speciesIds = Object.keys(speciesLayers);
