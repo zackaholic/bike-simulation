@@ -117,12 +117,58 @@ _LAYER_LUTS: dict[str, np.ndarray] = {
 }
 
 
+_LUT_NAMES: dict[int, str] = {
+    id(_LUT_TERRAIN): "terrain",
+    id(_LUT_VIRIDIS): "viridis",
+    id(_LUT_BLUES): "blues",
+    id(_LUT_GREENS): "greens",
+    id(_LUT_CATEGORICAL): "categorical",
+}
+
+
 def _get_lut(layer_name: str) -> np.ndarray:
     """Return the appropriate LUT for a layer, defaulting to viridis."""
     # Species density layers use greens
     if "density" in layer_name:
         return _LUT_GREENS
     return _LAYER_LUTS.get(layer_name, _LUT_VIRIDIS)
+
+
+def get_colormap_name(layer_name: str) -> str:
+    """Return the colormap name string for a layer."""
+    lut = _get_lut(layer_name)
+    return _LUT_NAMES.get(id(lut), "viridis")
+
+
+_LAYER_UNITS: dict[str, str] = {
+    "heightmap": "m",
+    "eroded_heightmap": "m",
+    "temperature": "°C",
+    "precipitation": "mm/yr",
+    "flow_accumulation": "cells",
+    "soil_moisture_summer": "",
+    "soil_moisture_winter": "",
+    "frost_days": "days/yr",
+    "growing_degree_days": "°C·days",
+    "solar_insolation": "",
+    "distance_to_water": "m",
+}
+
+
+def get_layer_info(
+    query: WorldQuery, version: int, tier: str, layer_name: str
+) -> dict:
+    """Return legend info for a layer: vmin, vmax, colormap name, units."""
+    _, vmin, vmax = _get_layer_data(query, version, tier, layer_name)
+    units = _LAYER_UNITS.get(layer_name, "")
+    if "density" in layer_name:
+        units = ""
+    return {
+        "vmin": vmin,
+        "vmax": vmax,
+        "colormap": get_colormap_name(layer_name),
+        "units": units,
+    }
 
 
 # ── Tile coordinate math ─────────────────────────────────────────

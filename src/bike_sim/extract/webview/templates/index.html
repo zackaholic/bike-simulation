@@ -40,10 +40,23 @@
   #sidebar td:first-child { font-weight: 600; color: #555; white-space: nowrap; }
   #sidebar td:last-child { text-align: right; }
   #sidebar .empty { color: #999; font-style: italic; }
+  #legend {
+    position: absolute; bottom: 20px; left: 10px; z-index: 1000;
+    background: rgba(255,255,255,0.9); padding: 8px 12px; border-radius: 4px;
+    box-shadow: 0 1px 5px rgba(0,0,0,0.3); font: 11px/1.4 sans-serif;
+    max-width: 220px; display: none;
+  }
+  #legend.visible { display: block; }
+  .legend-entry { margin-bottom: 6px; }
+  .legend-entry:last-child { margin-bottom: 0; }
+  .legend-label { font-weight: 600; color: #333; margin-bottom: 2px; }
+  .legend-bar { height: 12px; border-radius: 2px; border: 1px solid #ccc; }
+  .legend-range { display: flex; justify-content: space-between; color: #666; font-size: 10px; }
 </style>
 </head>
 <body>
 <div id="map"></div>
+<div id="legend"></div>
 <div id="toolbar">
   <label>Version: <select id="version-select"></select></label>
 </div>
@@ -329,11 +342,62 @@
     return name.match(/^seed_bank/) || name === "seed_bank_total";
   }
 
+  // ── Legend ──────────────────────────────────────────────────
+
+  var legendEl = document.getElementById("legend");
+  var legendEntries = {};  // layer key → DOM element
+
+  // CSS gradients matching the LUTs in tiles.py.
+  var colormapGradients = {
+    terrain: "linear-gradient(to right, rgb(20,60,120), rgb(50,120,60), rgb(80,160,50), rgb(160,140,80), rgb(180,160,140), rgb(240,240,240))",
+    viridis: "linear-gradient(to right, rgb(68,1,84), rgb(59,82,139), rgb(33,145,140), rgb(94,201,98), rgb(253,231,37))",
+    blues: "linear-gradient(to right, rgb(240,240,255), rgb(100,140,210), rgb(10,30,100))",
+    greens: "linear-gradient(to right, rgb(240,250,230), rgb(80,180,60), rgb(10,80,20))"
+  };
+
+  function addLegendEntry(key, tier, layer) {
+    if (legendEntries[key]) return;  // already showing
+    fetch("/api/world/" + version + "/layer_info/" + tier + "/" + layer)
+      .then(function (r) { return r.json(); })
+      .then(function (info) {
+        if (info.colormap === "categorical") return;  // skip categorical
+        var grad = colormapGradients[info.colormap] || colormapGradients.viridis;
+        var div = document.createElement("div");
+        div.className = "legend-entry";
+        div.innerHTML =
+          '<div class="legend-label">' + layer.replace(/_/g, " ") + (info.units ? ' <span style="font-weight:normal;color:#888">(' + info.units + ')</span>' : '') + '</div>' +
+          '<div class="legend-bar" style="background:' + grad + '"></div>' +
+          '<div class="legend-range"><span>' + info.vmin.toFixed(1) + '</span><span>' + info.vmax.toFixed(1) + '</span></div>';
+        legendEl.appendChild(div);
+        legendEntries[key] = div;
+        legendEl.classList.add("visible");
+      });
+  }
+
+  function removeLegendEntry(key) {
+    if (legendEntries[key]) {
+      legendEl.removeChild(legendEntries[key]);
+      delete legendEntries[key];
+      if (Object.keys(legendEntries).length === 0) {
+        legendEl.classList.remove("visible");
+      }
+    }
+  }
+
+  function clearAllLegends() {
+    for (var key in legendEntries) {
+      legendEl.removeChild(legendEntries[key]);
+    }
+    legendEntries = {};
+    legendEl.classList.remove("visible");
+  }
+
   function buildLayers() {
     activeTileLayers.forEach(function (tl) { map.removeLayer(tl); });
     activeTileLayers = [];
     if (activeSpeciesLayer) { map.removeLayer(activeSpeciesLayer); activeSpeciesLayer = null; }
     if (layerControl) { map.removeControl(layerControl); layerControl = null; }
+    clearAllLegends();
 
     var speciesCtrl = document.getElementById("species-control");
     var speciesSel = document.getElementById("species-select");
@@ -345,6 +409,9 @@
       .then(function (meta) {
         var overlays = {};
         var speciesLayers = {};
+
+        // Map from Leaflet layer control label → {tier, name} for legend lookup.
+        var layerMeta = {};
 
         var layers = meta.layers;
         for (var tier in layers) {
@@ -365,11 +432,13 @@
             var label = tier + " / " + name;
             var tl = makeTileLayer(tier, name, tier !== "geology");
             overlays[label] = tl;
+            layerMeta[label] = { tier: tier, name: name };
 
             // Default: heightmap on.
             if (name === "heightmap") {
               tl.addTo(map);
               activeTileLayers.push(tl);
+              addLegendEntry(label, tier, name);
             }
           }
         }
@@ -379,10 +448,16 @@
 
         layerControl = L.control.layers(null, overlays, { collapsed: false }).addTo(map);
 
-        map.on("overlayadd", function (e) { activeTileLayers.push(e.layer); });
+        map.on("overlayadd", function (e) {
+          activeTileLayers.push(e.layer);
+          if (layerMeta[e.name]) {
+            addLegendEntry(e.name, layerMeta[e.name].tier, layerMeta[e.name].name);
+          }
+        });
         map.on("overlayremove", function (e) {
           var idx = activeTileLayers.indexOf(e.layer);
           if (idx >= 0) activeTileLayers.splice(idx, 1);
+          removeLegendEntry(e.name);
         });
 
         var speciesIds = Object.keys(speciesLayers);
@@ -403,10 +478,12 @@
 
           speciesSel.onchange = function () {
             if (activeSpeciesLayer) { map.removeLayer(activeSpeciesLayer); }
+            removeLegendEntry("species_density");
             var sid = speciesSel.value;
             if (sid && speciesLayers[sid]) {
               activeSpeciesLayer = speciesLayers[sid];
               activeSpeciesLayer.addTo(map);
+              addLegendEntry("species_density", "ecology", "species_" + sid + "_density");
             } else {
               activeSpeciesLayer = null;
             }

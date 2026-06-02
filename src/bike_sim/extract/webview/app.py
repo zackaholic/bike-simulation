@@ -11,7 +11,7 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, render_template, request
 
-from bike_sim.extract.webview.tiles import MAX_ZOOM, render_tile, tile_valid
+from bike_sim.extract.webview.tiles import MAX_ZOOM, get_layer_info, render_tile, tile_valid
 from bike_sim.query.world_query import WorldQuery
 from bike_sim.world import World
 
@@ -113,6 +113,21 @@ def create_app(world_dir: str | Path) -> Flask:
             return jsonify({"error": f"Individual {individual_id} not found"}), 404
 
         return jsonify(detail)
+
+    # ── Layer info (for legends) ────────────────────────────────
+
+    @app.route("/api/world/<int:version>/layer_info/<tier>/<layer>")
+    def api_layer_info(version: int, tier: str, layer: str):
+        try:
+            world.get_version(version)
+        except KeyError:
+            return jsonify({"error": f"Version {version} not found"}), 404
+
+        available = query.available_layers(tier)
+        if layer not in available:
+            return jsonify({"error": f"Layer {tier}/{layer} not found"}), 404
+
+        return jsonify(get_layer_info(query, version, tier, layer))
 
     # ── Tile routes ───────────────────────────────────────────────
 

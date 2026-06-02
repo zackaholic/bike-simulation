@@ -676,3 +676,60 @@ class TestVersionPicker:
         meta_v1 = resp_v1.get_json()
         assert isinstance(meta_v1, dict)
         assert "layers" in meta_v1
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Phase 8 — Layer Legend
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestLayerLegend:
+    """Phase 8 — floating legend with gradient color bars for active layers."""
+
+    def test_layer_info_endpoint(self, client):
+        """GET /api/world/0/layer_info/geology/heightmap returns 200 with
+        vmin, vmax, and colormap keys."""
+        resp = client.get("/api/world/0/layer_info/geology/heightmap")
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert isinstance(data, dict)
+
+        for key in ("vmin", "vmax", "colormap"):
+            assert key in data, f"Missing key: {key}"
+
+        assert isinstance(data["vmin"], (int, float))
+        assert isinstance(data["vmax"], (int, float))
+        assert isinstance(data["colormap"], str)
+
+    def test_layer_info_colormap_type(self, client):
+        """Layer info for geology/heightmap returns colormap 'terrain'."""
+        resp = client.get("/api/world/0/layer_info/geology/heightmap")
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["colormap"] == "terrain", (
+            f"Expected colormap 'terrain' for heightmap, got {data['colormap']!r}"
+        )
+
+    def test_layer_info_invalid_layer(self, client):
+        """GET /api/world/0/layer_info/geology/nonexistent returns 404."""
+        resp = client.get("/api/world/0/layer_info/geology/nonexistent")
+        assert resp.status_code == 404
+
+    def test_layer_info_invalid_version(self, client):
+        """GET /api/world/999/layer_info/geology/heightmap returns 404."""
+        resp = client.get("/api/world/999/layer_info/geology/heightmap")
+        assert resp.status_code == 404
+
+    def test_index_contains_legend(self, client):
+        """GET / body contains evidence of a legend element."""
+        resp = client.get("/")
+
+        assert resp.status_code == 200
+        body = resp.data.decode("utf-8").lower()
+
+        assert "legend" in body, (
+            "Index page should contain a legend element "
+            "(expected 'legend' in the page body)"
+        )
