@@ -151,8 +151,31 @@ def tile_valid(z: int, x: int, y: int) -> bool:
 
 # ── Rendering ─────────────────────────────────────────────────────
 
+GRID_SIZE = 1000
 
-def _normalize(data: np.ndarray, layer_name: str) -> np.ndarray:
+# Cache full raster + (vmin, vmax) per (version, tier, layer_name) so all
+# tiles in a layer use the same data and normalization range.
+_layer_cache: dict[tuple[int, str, str], tuple[np.ndarray, float, float]] = {}
+
+
+def _get_layer_data(
+    query: WorldQuery, version: int, tier: str, layer_name: str
+) -> tuple[np.ndarray, float, float]:
+    """Return (full_raster, vmin, vmax) for the entire layer, cached."""
+    key = (version, tier, layer_name)
+    if key not in _layer_cache:
+        full = query.query_raster(
+            version, tier, layer_name,
+            (0, 0, WORLD_EXTENT, WORLD_EXTENT),
+            (GRID_SIZE, GRID_SIZE),
+        )
+        _layer_cache[key] = (full, float(np.nanmin(full)), float(np.nanmax(full)))
+    return _layer_cache[key]
+
+
+def _normalize(
+    data: np.ndarray, layer_name: str, vmin: float, vmax: float
+) -> np.ndarray:
     """Normalize array to 0-255 uint8 indices for LUT lookup."""
     lut = _get_lut(layer_name)
 
@@ -161,9 +184,7 @@ def _normalize(data: np.ndarray, layer_name: str) -> np.ndarray:
         indices = np.clip(data.astype(int), 0, len(lut) - 1)
         return indices.astype(np.uint8)
 
-    # Continuous layers: normalize to [0, 1] then scale to [0, 255]
-    vmin = float(np.nanmin(data))
-    vmax = float(np.nanmax(data))
+    # Continuous layers: normalize to [0, 1] using global range
     if vmax - vmin < 1e-10:
         return np.zeros(data.shape, dtype=np.uint8)
 
@@ -190,12 +211,30 @@ def render_tile(
     if cache_path.exists():
         return cache_path.read_bytes()
 
-    # Get raster data for this tile's bbox
-    bbox = tile_bbox(z, x, y)
-    data = query.query_raster(version, tier, layer_name, bbox, (TILE_SIZE, TILE_SIZE))
+    # Get full layer (cached) for consistent normalization and clean partitioning
+    full_raster, vmin, vmax = _get_layer_data(query, version, tier, layer_name)
 
-    # Apply colormap
-    indices = _normalize(data, layer_name)
+    # Compute clean cell partition — no overlap between adjacent tiles.
+    # Flip Y: Leaflet standard has y=0 at top (north), but our raster
+    # has row 0 at bottom (south). Flip so server y matches Leaflet y.
+    n = 2 ** z
+    flipped_y = n - 1 - y
+    row_start = flipped_y * GRID_SIZE // n
+    row_end = (flipped_y + 1) * GRID_SIZE // n
+    col_start = x * GRID_SIZE // n
+    col_end = (x + 1) * GRID_SIZE // n
+    crop = full_raster[row_start:row_end, col_start:col_end]
+
+    # Resample crop to tile size using nearest-neighbor
+    src_rows, src_cols = crop.shape
+    row_idx = (np.arange(TILE_SIZE) * src_rows / TILE_SIZE).astype(int)
+    col_idx = (np.arange(TILE_SIZE) * src_cols / TILE_SIZE).astype(int)
+    row_idx = np.clip(row_idx, 0, src_rows - 1)
+    col_idx = np.clip(col_idx, 0, src_cols - 1)
+    data = crop[np.ix_(row_idx, col_idx)]
+
+    # Apply colormap with global normalization
+    indices = _normalize(data, layer_name, vmin, vmax)
     lut = _get_lut(layer_name)
     rgb = lut[indices]  # (256, 256, 3)
 

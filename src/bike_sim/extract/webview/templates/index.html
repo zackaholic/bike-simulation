@@ -60,7 +60,24 @@
   var maxZoom = {{ max_zoom }};
   var defaultVersion = {{ current_version }};
 
-  // ── URL hash state ──────────────────────────────────────────
+  // ── Coordinate mapping ─────────────────────────────────────
+  // L.CRS.Simple transforms y' = -y, so positive lat values produce
+  // negative pixel coords. The standard pattern: use negative latitudes.
+  // Map bounds: lng [0, 256], lat [-256, 0].
+  //   lat = 0   → top (north)   → pixel y = 0
+  //   lat = -256 → bottom (south) → pixel y = 256
+  // This makes Leaflet's tile grid align with our server (tms: true).
+  var mapSize = 256;
+  var scale = mapSize / worldExtent;  // map units per meter
+
+  function metersToMap(x, y) {
+    return L.latLng(y * scale - mapSize, x * scale);
+  }
+  function mapToMeters(latlng) {
+    return { x: latlng.lng / scale, y: (latlng.lat + mapSize) / scale };
+  }
+
+  // ── URL hash state ─────────────────────────────────────────
 
   function parseHash() {
     var params = {};
@@ -84,12 +101,9 @@
   var hashState = parseHash();
   var version = hashState.version !== undefined ? parseInt(hashState.version, 10) : defaultVersion;
 
-  // ── Map setup ───────────────────────────────────────────────
+  // ── Map setup ──────────────────────────────────────────────
 
-  var bounds = L.latLngBounds(
-    L.latLng(0, 0),
-    L.latLng(worldExtent, worldExtent)
-  );
+  var bounds = L.latLngBounds(L.latLng(-mapSize, 0), L.latLng(0, mapSize));
 
   var map = L.map("map", {
     crs: L.CRS.Simple,
@@ -98,7 +112,6 @@
     maxBounds: bounds.pad(0.1)
   });
 
-  // Restore view from hash or fit bounds.
   if (hashState.lat && hashState.lng && hashState.z) {
     map.setView(
       L.latLng(parseFloat(hashState.lat), parseFloat(hashState.lng)),
@@ -108,18 +121,17 @@
     map.fitBounds(bounds);
   }
 
-  // Save map position to hash on move.
   map.on("moveend", function () {
     var c = map.getCenter();
     var h = parseHash();
     h.version = version;
     h.z = map.getZoom();
-    h.lat = c.lat.toFixed(0);
-    h.lng = c.lng.toFixed(0);
+    h.lat = c.lat.toFixed(2);
+    h.lng = c.lng.toFixed(2);
     updateHash(h);
   });
 
-  // ── Sidebar ─────────────────────────────────────────────────
+  // ── Sidebar ────────────────────────────────────────────────
 
   var sidebar = document.getElementById("sidebar");
   var sidebarContent = document.getElementById("sidebar-content");
@@ -158,6 +170,8 @@
     for (var key in rasters) {
       var parts = key.split("/");
       var tier = parts[0], layer = parts.slice(1).join("/");
+      // Skip seed bank layers in the sidebar — they're internal simulation state.
+      if (layer.match(/^seed_bank/)) continue;
       if (!byTier[tier]) byTier[tier] = [];
       byTier[tier].push({ layer: layer, value: rasters[key] });
     }
@@ -208,20 +222,19 @@
     return html;
   }
 
-  // Click handler for point inspection.
+  // Click handler: convert map coords to meters for the API.
   map.on("click", function (e) {
-    var x = e.latlng.lng;
-    var y = e.latlng.lat;
+    var m = mapToMeters(e.latlng);
 
     if (clickMarker) { map.removeLayer(clickMarker); }
     clickMarker = L.circleMarker(e.latlng, { radius: 6, color: "#ff3333", weight: 2 }).addTo(map);
 
-    fetch("/api/world/" + version + "/point?x=" + x + "&y=" + y)
+    fetch("/api/world/" + version + "/point?x=" + m.x + "&y=" + m.y)
       .then(function (r) { return r.json(); })
       .then(function (data) { openSidebar(renderPointData(data)); });
   });
 
-  // ── Individual markers ──────────────────────────────────────
+  // ── Individual markers ─────────────────────────────────────
 
   var individualLayer = L.layerGroup().addTo(map);
   var speciesColors = [
@@ -261,10 +274,12 @@
 
   function loadIndividuals() {
     var b = map.getBounds();
-    var x_min = Math.max(0, b.getWest());
-    var y_min = Math.max(0, b.getSouth());
-    var x_max = Math.min(worldExtent, b.getEast());
-    var y_max = Math.min(worldExtent, b.getNorth());
+    var sw = mapToMeters(b.getSouthWest());
+    var ne = mapToMeters(b.getNorthEast());
+    var x_min = Math.max(0, sw.x);
+    var y_min = Math.max(0, sw.y);
+    var x_max = Math.min(worldExtent, ne.x);
+    var y_max = Math.min(worldExtent, ne.y);
 
     fetch("/api/world/" + version + "/individuals?x_min=" + x_min + "&y_min=" + y_min +
           "&x_max=" + x_max + "&y_max=" + y_max)
@@ -273,7 +288,7 @@
         individualLayer.clearLayers();
         individuals.forEach(function (ind) {
           var color = getSpeciesColor(ind.species_id);
-          var marker = L.circleMarker(L.latLng(ind.y, ind.x), {
+          var marker = L.circleMarker(metersToMap(ind.x, ind.y), {
             radius: 5, color: color, fillColor: color, fillOpacity: 0.7, weight: 1
           });
           marker.bindTooltip(ind.individual_id, { direction: "top", offset: [0, -6] });
@@ -291,7 +306,7 @@
   map.on("moveend", loadIndividuals);
   loadIndividuals();
 
-  // ── Layer controls ──────────────────────────────────────────
+  // ── Layer controls ─────────────────────────────────────────
 
   var layerControl = null;
   var activeTileLayers = [];
@@ -300,18 +315,21 @@
   function makeTileLayer(tier, layer) {
     return L.tileLayer(
       "/api/world/" + version + "/tiles/" + tier + "/" + layer + "/{z}/{x}/{y}.png",
-      { tileSize: 256, bounds: bounds, minZoom: 0, maxZoom: maxZoom, noWrap: true, tms: true }
+      { tileSize: 256, bounds: bounds, minZoom: 0, maxZoom: maxZoom, noWrap: true }
     );
   }
 
+  // Layers to skip in the UI — internal simulation state, not useful visually.
+  function isInternalLayer(name) {
+    return name.match(/^seed_bank/) || name === "seed_bank_total";
+  }
+
   function buildLayers() {
-    // Remove old layers and control.
     activeTileLayers.forEach(function (tl) { map.removeLayer(tl); });
     activeTileLayers = [];
     if (activeSpeciesLayer) { map.removeLayer(activeSpeciesLayer); activeSpeciesLayer = null; }
     if (layerControl) { map.removeControl(layerControl); layerControl = null; }
 
-    // Reset species dropdown.
     var speciesCtrl = document.getElementById("species-control");
     var speciesSel = document.getElementById("species-select");
     speciesCtrl.style.display = "none";
@@ -330,14 +348,19 @@
           var names = layers[tier];
           for (var i = 0; i < names.length; i++) {
             var name = names[i];
-            var label = tier + " / " + name;
-            var tl = makeTileLayer(tier, name);
 
+            // Skip internal layers.
+            if (isInternalLayer(name)) continue;
+
+            // Species density → dropdown.
             if (name.match(/^species_.*_density$/)) {
               var sid = name.replace(/^species_/, "").replace(/_density$/, "");
-              speciesLayers[sid] = tl;
+              speciesLayers[sid] = makeTileLayer(tier, name);
               continue;
             }
+
+            var label = tier + " / " + name;
+            var tl = makeTileLayer(tier, name);
 
             if (tier === "geology") {
               baseLayers[label] = tl;
@@ -351,14 +374,12 @@
         if (firstBase) { firstBase.addTo(map); activeTileLayers.push(firstBase); }
         layerControl = L.control.layers(baseLayers, overlays, { collapsed: false }).addTo(map);
 
-        // Track overlay additions/removals.
         map.on("overlayadd", function (e) { activeTileLayers.push(e.layer); });
         map.on("overlayremove", function (e) {
           var idx = activeTileLayers.indexOf(e.layer);
           if (idx >= 0) activeTileLayers.splice(idx, 1);
         });
         map.on("baselayerchange", function (e) {
-          // Replace the base layer in tracking.
           activeTileLayers = activeTileLayers.filter(function (l) {
             for (var k in baseLayers) { if (baseLayers[k] === l) return false; }
             return true;
@@ -366,7 +387,6 @@
           activeTileLayers.push(e.layer);
         });
 
-        // Species dropdown.
         var speciesIds = Object.keys(speciesLayers);
         if (speciesIds.length > 0) {
           speciesCtrl.style.display = "block";
@@ -399,7 +419,7 @@
 
   buildLayers();
 
-  // ── Version picker ──────────────────────────────────────────
+  // ── Version picker ─────────────────────────────────────────
 
   var versionSelect = document.getElementById("version-select");
 
@@ -429,7 +449,6 @@
     loadIndividuals();
   });
 
-  // Restore version from hash on back/forward navigation.
   window.addEventListener("hashchange", function () {
     var h = parseHash();
     if (h.version !== undefined) {
