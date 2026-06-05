@@ -6,9 +6,12 @@ produces:
 
   1. **Climate envelope**: temperature and precipitation fields derived from
      elevation (lapse rate) and orographic effects.
-  2. **Hydrology**: D8 flow accumulation and hydraulic erosion, producing
-     river networks and an eroded heightmap.
-  3. **Derived-state cache**: soil moisture (summer/winter), frost days,
+  2. **Hydrology**: D8 flow accumulation and particle-based hydraulic erosion
+     (replacing the earlier grid-diffusion placeholder), producing river
+     channels, alluvial fans, and an eroded heightmap with a separate
+     sediment depth layer.
+  3. **Thermal erosion** (talus creep) that softens cliffs and fills gullies.
+  4. **Derived-state cache**: soil moisture (summer/winter), frost days,
      growing degree days, solar insolation, and distance to water — all
      fields that ecology needs but that are fundamentally climate-driven.
 
@@ -17,7 +20,7 @@ and distinct pass_ids per generation pass, ensuring full reproducibility from
 the world seed.
 
 The tier operates at ~1000 years per tick. Each tick reads the geology
-heightmap, computes climate and hydrology, and writes 10 raster layers to
+heightmap, computes climate and hydrology, and writes 11 raster layers to
 the "climate_hydrology" namespace in the RasterStore.
 """
 
@@ -26,6 +29,7 @@ from __future__ import annotations
 import numpy as np
 
 from bike_sim.rng import create_rng
+from bike_sim.tiers.erosion import ErosionParams, erode_hydraulic, erode_thermal
 from bike_sim.world import World
 
 TIER = "climate_hydrology"
@@ -34,9 +38,9 @@ TIER = "climate_hydrology"
 class ClimateHydrologyTier:
     """Climate-hydrology tier: climate envelope, hydrology, and derived cache.
 
-    Reads the geology heightmap and produces 10 raster layers per tick:
+    Reads the geology heightmap and produces 11 raster layers per tick:
     temperature, precipitation, flow_accumulation, eroded_heightmap,
-    soil_moisture_summer, soil_moisture_winter, frost_days,
+    sediment_depth, soil_moisture_summer, soil_moisture_winter, frost_days,
     growing_degree_days, solar_insolation, distance_to_water.
     """
 
@@ -44,40 +48,70 @@ class ClimateHydrologyTier:
     CELL_SIZE: float = 50.0  # metres per cell
     YEARS_PER_TICK: int = 1000
 
-    def __init__(self, world: World) -> None:
+    def __init__(self, world: World, erosion_params: ErosionParams | None = None) -> None:
         self._world = world
+        self._erosion_params = erosion_params or ErosionParams()
 
     def tick(self) -> None:
         """Advance climate-hydrology by one tick."""
         clock = self._world.tier_clocks[TIER]
         tick_num = clock.tick_number
 
-        # Verify geology has been ticked.
+        # Verify geology.
         if "heightmap" not in self._world.rasters.list_layers("geology"):
             raise RuntimeError("Geology must be ticked before climate-hydrology")
 
         heightmap = self._world.rasters.read_layer("geology", "heightmap")
+        bedrock_type = self._world.rasters.read_layer("geology", "bedrock_type")
 
-        # 1. Climate envelope.
+        # 1. Climate envelope (unchanged).
         temperature, precipitation = self._compute_climate(heightmap, tick_num)
 
-        # 2. Hydrology: flow accumulation + erosion.
-        flow_acc = self._compute_flow_accumulation(heightmap)
-        eroded = self._erode(heightmap, precipitation, flow_acc, tick_num)
+        # 2. Pre-erosion flow accumulation (for particle spawn weighting).
+        pre_flow = self._compute_flow_accumulation(heightmap)
 
-        # 3. Derived-state cache (writes its own layers).
-        self._compute_derived_cache(eroded, temperature, precipitation, flow_acc, tick_num)
+        # 3. Load or initialize sediment.
+        sediment = self._load_sediment(tick_num)
 
-        # Write climate and hydrology layers.
+        # 4. Hydraulic erosion.
+        rng = create_rng(self._world.seed, TIER, "erosion", tick_num)
+        eroded, sediment = erode_hydraulic(
+            heightmap, bedrock_type, precipitation, pre_flow,
+            sediment, rng, self._erosion_params,
+        )
+
+        # 5. Thermal erosion.
+        erode_thermal(eroded, sediment, self._erosion_params)
+
+        # 6. Post-erosion flow accumulation on combined surface.
+        combined_surface = eroded + sediment
+        flow_acc = self._compute_flow_accumulation(combined_surface)
+
+        # 7. Derived-state cache (uses combined surface + post-erosion flow).
+        self._compute_derived_cache(
+            combined_surface, sediment, temperature, precipitation, flow_acc, tick_num
+        )
+
+        # 8. Write layers.
         store = self._world.rasters
         store.write_layer(TIER, "temperature", temperature, tick_num)
         store.write_layer(TIER, "precipitation", precipitation, tick_num)
         store.write_layer(TIER, "flow_accumulation", flow_acc, tick_num)
         store.write_layer(TIER, "eroded_heightmap", eroded, tick_num)
+        store.write_layer(TIER, "sediment_depth", sediment, tick_num)
 
         # Advance clock.
         clock.tick_number += 1
         clock.simulated_year += self.YEARS_PER_TICK
+
+    def _load_sediment(self, tick_number: int) -> np.ndarray:
+        """Load previous sediment layer, or zeros if none exists."""
+        try:
+            if "sediment_depth" in self._world.rasters.list_layers(TIER):
+                return self._world.rasters.read_layer(TIER, "sediment_depth")
+        except Exception:
+            pass
+        return np.zeros((self.GRID_SIZE, self.GRID_SIZE), dtype=np.float64)
 
     # ------------------------------------------------------------------
     # Climate envelope
@@ -157,40 +191,14 @@ class ClimateHydrologyTier:
 
         return acc
 
-    def _erode(
-        self,
-        heightmap: np.ndarray,
-        precipitation: np.ndarray,
-        flow_acc: np.ndarray,
-        tick_number: int,
-    ) -> np.ndarray:
-        """Simplified grid-based hydraulic erosion."""
-        rng = create_rng(self._world.seed, TIER, "erosion", tick_number)  # noqa: F841
-        eroded = heightmap.copy()
-
-        # Erosion power: proportional to sqrt(flow) * slope, normalised.
-        dy, dx = np.gradient(eroded)
-        slope = np.sqrt(dx**2 + dy**2)
-        erosion_power = np.sqrt(flow_acc) * slope
-        erosion_power /= erosion_power.max() + 1e-10
-
-        # Multiple passes of gentle erosion + soil-creep diffusion.
-        for _ in range(5):
-            dy, dx = np.gradient(eroded)
-            slope = np.sqrt(dx**2 + dy**2)
-            erosion = erosion_power * slope * 2.0
-            eroded -= erosion
-            eroded = _smooth(eroded, sigma=0.5)
-
-        return np.clip(eroded, 0, None).astype(np.float64)
-
     # ------------------------------------------------------------------
     # Derived-state cache
     # ------------------------------------------------------------------
 
     def _compute_derived_cache(
         self,
-        eroded_heightmap: np.ndarray,
+        combined_surface: np.ndarray,
+        sediment: np.ndarray,
         temperature: np.ndarray,
         precipitation: np.ndarray,
         flow_acc: np.ndarray,
@@ -206,8 +214,10 @@ class ClimateHydrologyTier:
 
         # --- Soil moisture (summer and winter) ---
         base_moisture = np.clip(precipitation / 2000.0, 0, 1)
-        elev_norm = eroded_heightmap / (eroded_heightmap.max() + 1e-10)
+        elev_norm = combined_surface / (combined_surface.max() + 1e-10)
         base_moisture += (1 - elev_norm) * 0.2
+        sediment_bonus = np.minimum(sediment / 5.0, 0.15)
+        base_moisture += sediment_bonus
         base_moisture = np.clip(base_moisture, 0, 1)
 
         summer_moisture = np.clip(
@@ -234,7 +244,7 @@ class ClimateHydrologyTier:
         store.write_layer(TIER, "growing_degree_days", gdd.astype(np.float64), tick_number)
 
         # --- Solar insolation ---
-        dy, dx = np.gradient(eroded_heightmap, self.CELL_SIZE)
+        dy, dx = np.gradient(combined_surface, self.CELL_SIZE)
         slope_angle = np.arctan(np.sqrt(dx**2 + dy**2))
         aspect = np.arctan2(-dx, dy)
         insolation = np.cos(slope_angle) * (0.5 + 0.5 * np.cos(aspect - np.pi))

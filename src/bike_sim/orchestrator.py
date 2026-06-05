@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from bike_sim.tiers.climate_hydrology import ClimateHydrologyTier
 from bike_sim.tiers.ecology import EcologyTier
+from bike_sim.tiers.erosion import ErosionParams
 from bike_sim.tiers.geology import GeologyTier
 from bike_sim.world import World
 
@@ -25,8 +26,9 @@ class Orchestrator:
     RIDE_YEARS_PER_MINUTE: float = 1.0
     RIDE_MAX_YEARS: float = 50.0
 
-    def __init__(self, world: World) -> None:
+    def __init__(self, world: World, erosion_params: ErosionParams | None = None) -> None:
         self._world = world
+        self._erosion_params = erosion_params
 
     def create_world(self) -> None:
         """Initialize world by ticking geology and climate-hydrology once.
@@ -39,7 +41,7 @@ class Orchestrator:
         self._world.rasters.set_version(next_version)
 
         GeologyTier(self._world).tick()
-        ClimateHydrologyTier(self._world).tick()
+        ClimateHydrologyTier(self._world, erosion_params=self._erosion_params).tick()
 
         self._world.commit_version(trigger="create_world")
 
@@ -77,7 +79,7 @@ class Orchestrator:
             # Ticks beyond the initial bootstrap tick.
             actual_extra_climate = climate_clock.tick_number - 1
             if expected_climate > actual_extra_climate:
-                ClimateHydrologyTier(self._world).tick()
+                ClimateHydrologyTier(self._world, erosion_params=self._erosion_params).tick()
                 climate_ticks += 1
 
                 # Similarly for geology relative to climate years.

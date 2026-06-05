@@ -7,8 +7,11 @@ import pytest
 
 from bike_sim.tiers.climate_hydrology import ClimateHydrologyTier
 from bike_sim.tiers.ecology import EcologyTier
+from bike_sim.tiers.erosion import ErosionParams
 from bike_sim.tiers.geology import GeologyTier
 from bike_sim.world import TierId, World
+
+FAST_PARAMS = ErosionParams(num_particles=1_000, max_lifetime=30)
 
 
 @pytest.fixture
@@ -16,7 +19,7 @@ def eco_world(tmp_path):
     """Create a world with geology and climate-hydrology already ticked."""
     world = World.create(tmp_path / "world", seed=42)
     GeologyTier(world).tick()
-    ClimateHydrologyTier(world).tick()
+    ClimateHydrologyTier(world, erosion_params=FAST_PARAMS).tick()
     return world
 
 
@@ -195,7 +198,7 @@ class TestSpeciation:
         for suffix in ("a", "b"):
             w = World.create(tmp_path / f"world_{suffix}", seed=42)
             GeologyTier(w).tick()
-            ClimateHydrologyTier(w).tick()
+            ClimateHydrologyTier(w, erosion_params=FAST_PARAMS).tick()
             eco = EcologyTier(w)
             for _ in range(20):
                 eco.tick()
@@ -308,7 +311,7 @@ def test_full_stack_many_ticks_no_crash(tmp_path):
     """Run full stack for 20 ecology ticks: no crashes, valid invariants."""
     world = World.create(tmp_path / "world", seed=42)
     GeologyTier(world).tick()
-    ClimateHydrologyTier(world).tick()
+    ClimateHydrologyTier(world, erosion_params=FAST_PARAMS).tick()
     eco = EcologyTier(world)
     for _ in range(20):
         eco.tick()

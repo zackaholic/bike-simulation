@@ -7,8 +7,11 @@ import pytest
 
 from bike_sim.tiers.climate_hydrology import ClimateHydrologyTier
 from bike_sim.tiers.ecology import EcologyTier
+from bike_sim.tiers.erosion import ErosionParams
 from bike_sim.tiers.geology import GeologyTier
 from bike_sim.world import TierId, World
+
+FAST_PARAMS = ErosionParams(num_particles=1_000, max_lifetime=30)
 
 REQUIRED_GENOME_KEYS = {
     "drought_tolerance",
@@ -26,7 +29,7 @@ def eco_world(tmp_path):
     """Create a world with geology and climate-hydrology already ticked."""
     world = World.create(tmp_path / "world", seed=42)
     GeologyTier(world).tick()
-    ClimateHydrologyTier(world).tick()
+    ClimateHydrologyTier(world, erosion_params=FAST_PARAMS).tick()
     return world
 
 
@@ -92,7 +95,7 @@ def test_deterministic_from_seed(tmp_path):
     for suffix in ("a", "b"):
         w = World.create(tmp_path / f"world_{suffix}", seed=12345)
         GeologyTier(w).tick()
-        ClimateHydrologyTier(w).tick()
+        ClimateHydrologyTier(w, erosion_params=FAST_PARAMS).tick()
         EcologyTier(w).tick()
         worlds.append(w)
 
@@ -121,7 +124,7 @@ def test_different_seeds_differ(tmp_path):
     for seed in (1, 2):
         w = World.create(tmp_path / f"world_{seed}", seed=seed)
         GeologyTier(w).tick()
-        ClimateHydrologyTier(w).tick()
+        ClimateHydrologyTier(w, erosion_params=FAST_PARAMS).tick()
         EcologyTier(w).tick()
         layers = sorted(
             lyr

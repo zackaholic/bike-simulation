@@ -184,3 +184,65 @@ All entries below come from the initial planning conversation; they represent th
 ### Process note
 
 This conversation was a good example of *why* the decision log matters. The initial plan was structurally sound but had two real issues (backward-walking lookups, alive-vs-existed ambiguity) that would have caused problems later. Catching them before implementation cost an hour of design discussion; catching them after would have meant a schema migration. The pattern of "Claude Code proposes a concrete plan, Claude (chat) sanity-checks it" is working well and should continue for architectural decisions in subsequent phases.
+
+## Particle-based hydraulic erosion (gap #1)
+
+**Context**: The original erosion implementation was a placeholder — 5 passes of grid-based diffusive smoothing producing only cosmetic terrain changes. This was the first of five known gaps to address, chosen first because terrain shape is foundational to everything downstream (river graph, ecology, rendering).
+
+### Decision: particle-based over enhanced grid-based
+
+**Decision**: Replace the grid diffusion placeholder with particle-based hydraulic erosion (virtual water droplets flowing downhill, eroding and depositing sediment).
+
+**Why**: Particle-based erosion naturally produces the features that make terrain feel water-carved — V-shaped valleys, alluvial fans, differential channel depths. Grid-based approaches can be enhanced but tend toward uniform smoothing rather than channelised carving. The overnight compute budget makes particle simulation tractable even at 200K particles per tick.
+
+**Considered alternative**: Keeping grid-based but running many more passes with a stream-power formula. Rejected because it still lacks sediment transport and produces broad smoothing rather than discrete channels.
+
+### Decision: separate erosion module (`erosion.py`)
+
+**Decision**: Core erosion algorithms live in `src/bike_sim/tiers/erosion.py`, a pure-numpy module with no bike_sim imports. `climate_hydrology.py` calls into it.
+
+**Why**: The particle simulation is 400+ lines of self-contained numerical code. Keeping it in `climate_hydrology.py` would blur two concerns (climate envelope vs. terrain carving). The pure-numpy design means the inner particle loop (`_simulate_particle`) can be wrapped with `@numba.njit` later without restructuring.
+
+### Decision: simple scalar bedrock erodibility
+
+**Decision**: Each of the 6 bedrock types maps to a single erodibility float (0.3 for granite to 1.2 for shale). Erosion erodes sediment first; only after sediment is depleted does it cut bedrock, scaled by erodibility.
+
+**Why**: Produces visible differential erosion (hard ridges, soft valleys) with minimal complexity. The geology tier already has type labels; this adds properties without changing the geology interface.
+
+**Note for future**: Could expand to `{hardness, solubility, fracture_tendency}` per rock type for more nuanced weathering. The current scalar approach doesn't block this.
+
+### Decision: thermal erosion as companion pass
+
+**Decision**: After hydraulic particle erosion, run a vectorised thermal erosion pass (talus creep) that redistributes material on slopes exceeding the angle of repose.
+
+**Why**: Particle erosion alone creates sharp channels but unrealistic cliff faces. Thermal erosion softens these into scree slopes and fills narrow gullies — the complementary weathering process that makes landscapes look physical rather than algorithmically carved.
+
+### Decision: sediment as a separate layer, not merged into heightmap
+
+**Decision**: Erosion produces two outputs: `eroded_heightmap` (bedrock surface) and `sediment_depth` (unconsolidated material on top). The combined surface is `eroded_heightmap + sediment_depth`.
+
+**Why**: Sediment and bedrock have different erodibility (sediment is always easy to erode; bedrock depends on type). Tracking them separately means particles naturally cut through sediment deposits before hitting bedrock. The sediment layer also feeds the derived-state cache (thick sediment increases soil moisture) and will be visible to ecology.
+
+### Decision: post-erosion flow accumulation recomputation
+
+**Decision**: Flow accumulation is computed twice per tick — once pre-erosion (for particle spawn weighting) and once post-erosion (on the combined surface, for the derived-state cache).
+
+**Why**: Erosion changes the terrain, which changes where water flows. The derived cache (especially `distance_to_water`) must reflect the post-erosion landscape, not the pre-erosion one. The extra flow computation is ~2s and worth the accuracy.
+
+### Decision: erosion scope separate from river graph
+
+**Decision**: This work produces carved terrain + sediment. Discrete river channels, lakes, meanders, and springs are deferred to river graph work (gap #2).
+
+**Why**: Pragmatic separation of concerns. The particle erosion naturally produces channel-like carving in the heightmap that the river graph extractor can later identify and formalise. Bundling everything would make the scope unmanageable.
+
+**Note**: The design docs (`simulation-design.md:42-48`) arguably bundle sediment transport with river graph construction. If this separation causes problems (e.g., realistic deltas need sediment flowing along discrete channels), we may need to revisit.
+
+### Decision: literature defaults for parameters, tune visually
+
+**Decision**: Start with well-known defaults from terrain erosion literature (inertia 0.1, capacity factor 6.0, deposition/erosion rate 0.3, etc.). Tune using the webview inspector.
+
+**Why**: These parameters interact nonlinearly; theoretical derivation is less useful than visual tuning against the project's aesthetic goals. The webview gives us the inspection tools to iterate.
+
+### Scale calibration note
+
+Each tick represents 1000 simulated years. 200K particles per tick, each representing aggregate storm erosion. Starting estimate: this produces 10-50m of carving in major drainage paths. Primary tuning knobs if terrain looks wrong: `num_particles`, `erosion_rate`, `capacity_factor`.

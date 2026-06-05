@@ -4,8 +4,12 @@ import numpy as np
 import pytest
 
 from bike_sim.tiers.climate_hydrology import ClimateHydrologyTier
+from bike_sim.tiers.erosion import ErosionParams
 from bike_sim.tiers.geology import GeologyTier
 from bike_sim.world import TierId, World
+
+# Reduced erosion params for fast tests.
+FAST_PARAMS = ErosionParams(num_particles=1_000, max_lifetime=30)
 
 # All layers the climate-hydrology tier must produce.
 EXPECTED_LAYERS = [
@@ -13,6 +17,7 @@ EXPECTED_LAYERS = [
     "precipitation",
     "flow_accumulation",
     "eroded_heightmap",
+    "sediment_depth",
     "soil_moisture_summer",
     "soil_moisture_winter",
     "frost_days",
@@ -35,7 +40,7 @@ def geo_world(tmp_path):
 
 def test_first_tick_produces_all_layers(geo_world):
     """After geology tick + climate-hydrology tick, all expected layers exist."""
-    ClimateHydrologyTier(geo_world).tick()
+    ClimateHydrologyTier(geo_world, erosion_params=FAST_PARAMS).tick()
 
     layers = geo_world.rasters.list_layers(TierId.CLIMATE_HYDROLOGY)
     for name in EXPECTED_LAYERS:
@@ -44,7 +49,7 @@ def test_first_tick_produces_all_layers(geo_world):
 
 def test_all_layers_shape_and_dtype(geo_world):
     """All climate-hydrology layers are (1000, 1000) float64."""
-    ClimateHydrologyTier(geo_world).tick()
+    ClimateHydrologyTier(geo_world, erosion_params=FAST_PARAMS).tick()
 
     for name in EXPECTED_LAYERS:
         arr = geo_world.rasters.read_layer(TierId.CLIMATE_HYDROLOGY, name)
@@ -59,8 +64,8 @@ def test_deterministic_from_seed(tmp_path):
 
     GeologyTier(w1).tick()
     GeologyTier(w2).tick()
-    ClimateHydrologyTier(w1).tick()
-    ClimateHydrologyTier(w2).tick()
+    ClimateHydrologyTier(w1, erosion_params=FAST_PARAMS).tick()
+    ClimateHydrologyTier(w2, erosion_params=FAST_PARAMS).tick()
 
     for name in EXPECTED_LAYERS:
         a = w1.rasters.read_layer(TierId.CLIMATE_HYDROLOGY, name)
@@ -75,8 +80,8 @@ def test_different_seeds_differ(tmp_path):
 
     GeologyTier(w1).tick()
     GeologyTier(w2).tick()
-    ClimateHydrologyTier(w1).tick()
-    ClimateHydrologyTier(w2).tick()
+    ClimateHydrologyTier(w1, erosion_params=FAST_PARAMS).tick()
+    ClimateHydrologyTier(w2, erosion_params=FAST_PARAMS).tick()
 
     # At least one layer must differ (check temperature as representative).
     t1 = w1.rasters.read_layer(TierId.CLIMATE_HYDROLOGY, "temperature")
@@ -86,7 +91,7 @@ def test_different_seeds_differ(tmp_path):
 
 def test_tier_clock_advances(geo_world):
     """After one tick, clock tick_number=1 and simulated_year > 0."""
-    ClimateHydrologyTier(geo_world).tick()
+    ClimateHydrologyTier(geo_world, erosion_params=FAST_PARAMS).tick()
 
     clock = geo_world.tier_clocks[TierId.CLIMATE_HYDROLOGY]
     assert clock.tick_number == 1
@@ -106,7 +111,7 @@ def test_requires_geology_first(tmp_path):
 
 def test_temperature_decreases_with_elevation(geo_world):
     """Higher cells should generally have lower temperature (lapse rate)."""
-    ClimateHydrologyTier(geo_world).tick()
+    ClimateHydrologyTier(geo_world, erosion_params=FAST_PARAMS).tick()
 
     heightmap = geo_world.rasters.read_layer(TierId.GEOLOGY, "heightmap")
     temperature = geo_world.rasters.read_layer(TierId.CLIMATE_HYDROLOGY, "temperature")
@@ -126,7 +131,7 @@ def test_temperature_decreases_with_elevation(geo_world):
 
 def test_precipitation_reasonable_range(geo_world):
     """All precipitation values should be positive and plausible (0 < precip < 5000 mm/yr)."""
-    ClimateHydrologyTier(geo_world).tick()
+    ClimateHydrologyTier(geo_world, erosion_params=FAST_PARAMS).tick()
 
     precip = geo_world.rasters.read_layer(TierId.CLIMATE_HYDROLOGY, "precipitation")
     assert np.all(np.isfinite(precip))
@@ -139,7 +144,7 @@ def test_precipitation_reasonable_range(geo_world):
 
 def test_flow_accumulation_positive(geo_world):
     """All flow accumulation values should be >= 1 (each cell counts at least itself)."""
-    ClimateHydrologyTier(geo_world).tick()
+    ClimateHydrologyTier(geo_world, erosion_params=FAST_PARAMS).tick()
 
     flow = geo_world.rasters.read_layer(TierId.CLIMATE_HYDROLOGY, "flow_accumulation")
     assert np.all(np.isfinite(flow))
@@ -148,7 +153,7 @@ def test_flow_accumulation_positive(geo_world):
 
 def test_rivers_in_valleys(geo_world):
     """Cells with high flow accumulation (top 1%) should generally have below-median elevation."""
-    ClimateHydrologyTier(geo_world).tick()
+    ClimateHydrologyTier(geo_world, erosion_params=FAST_PARAMS).tick()
 
     flow = geo_world.rasters.read_layer(TierId.CLIMATE_HYDROLOGY, "flow_accumulation")
     eroded = geo_world.rasters.read_layer(TierId.CLIMATE_HYDROLOGY, "eroded_heightmap")
@@ -169,7 +174,7 @@ def test_rivers_in_valleys(geo_world):
 
 def test_erosion_lowers_terrain(geo_world):
     """Eroded heightmap should have lower or equal mean elevation vs. the original."""
-    ClimateHydrologyTier(geo_world).tick()
+    ClimateHydrologyTier(geo_world, erosion_params=FAST_PARAMS).tick()
 
     original = geo_world.rasters.read_layer(TierId.GEOLOGY, "heightmap")
     eroded = geo_world.rasters.read_layer(TierId.CLIMATE_HYDROLOGY, "eroded_heightmap")
@@ -182,7 +187,7 @@ def test_erosion_lowers_terrain(geo_world):
 
 def test_erosion_preserves_extent(geo_world):
     """Eroded heightmap is same shape as geology heightmap, all values finite."""
-    ClimateHydrologyTier(geo_world).tick()
+    ClimateHydrologyTier(geo_world, erosion_params=FAST_PARAMS).tick()
 
     original = geo_world.rasters.read_layer(TierId.GEOLOGY, "heightmap")
     eroded = geo_world.rasters.read_layer(TierId.CLIMATE_HYDROLOGY, "eroded_heightmap")
@@ -196,7 +201,7 @@ def test_erosion_preserves_extent(geo_world):
 
 def test_soil_moisture_range(geo_world):
     """Both summer and winter soil moisture should be in [0, 1]."""
-    ClimateHydrologyTier(geo_world).tick()
+    ClimateHydrologyTier(geo_world, erosion_params=FAST_PARAMS).tick()
 
     for season in ("soil_moisture_summer", "soil_moisture_winter"):
         arr = geo_world.rasters.read_layer(TierId.CLIMATE_HYDROLOGY, season)
@@ -207,7 +212,7 @@ def test_soil_moisture_range(geo_world):
 
 def test_winter_moisture_gte_summer(geo_world):
     """Mean winter soil moisture should be >= mean summer moisture."""
-    ClimateHydrologyTier(geo_world).tick()
+    ClimateHydrologyTier(geo_world, erosion_params=FAST_PARAMS).tick()
 
     summer = geo_world.rasters.read_layer(TierId.CLIMATE_HYDROLOGY, "soil_moisture_summer")
     winter = geo_world.rasters.read_layer(TierId.CLIMATE_HYDROLOGY, "soil_moisture_winter")
@@ -220,7 +225,7 @@ def test_winter_moisture_gte_summer(geo_world):
 
 def test_growing_degree_days_positive(geo_world):
     """All growing degree day values should be >= 0."""
-    ClimateHydrologyTier(geo_world).tick()
+    ClimateHydrologyTier(geo_world, erosion_params=FAST_PARAMS).tick()
 
     gdd = geo_world.rasters.read_layer(TierId.CLIMATE_HYDROLOGY, "growing_degree_days")
     assert np.all(np.isfinite(gdd))
@@ -229,7 +234,7 @@ def test_growing_degree_days_positive(geo_world):
 
 def test_distance_to_water_nonnegative(geo_world):
     """All distance-to-water values >= 0, and some cells should be 0 (water/river cells)."""
-    ClimateHydrologyTier(geo_world).tick()
+    ClimateHydrologyTier(geo_world, erosion_params=FAST_PARAMS).tick()
 
     dtw = geo_world.rasters.read_layer(TierId.CLIMATE_HYDROLOGY, "distance_to_water")
     assert np.all(np.isfinite(dtw))
@@ -239,9 +244,82 @@ def test_distance_to_water_nonnegative(geo_world):
 
 def test_solar_insolation_range(geo_world):
     """Solar insolation values should be in [0, 1]."""
-    ClimateHydrologyTier(geo_world).tick()
+    ClimateHydrologyTier(geo_world, erosion_params=FAST_PARAMS).tick()
 
     sol = geo_world.rasters.read_layer(TierId.CLIMATE_HYDROLOGY, "solar_insolation")
     assert np.all(np.isfinite(sol))
     assert sol.min() >= 0.0, f"solar_insolation min is {sol.min()}"
     assert sol.max() <= 1.0, f"solar_insolation max is {sol.max()}"
+
+
+# ---------- Sediment / particle-erosion tests ----------
+
+
+def test_sediment_nonnegative(geo_world):
+    """All sediment_depth values should be >= 0."""
+    ClimateHydrologyTier(geo_world, erosion_params=FAST_PARAMS).tick()
+    sed = geo_world.rasters.read_layer(TierId.CLIMATE_HYDROLOGY, "sediment_depth")
+    assert np.all(np.isfinite(sed))
+    assert sed.min() >= 0.0, f"Minimum sediment_depth is {sed.min()}"
+
+
+def test_sediment_deposited_in_low_areas(geo_world):
+    """Mean sediment should be higher in low-elevation areas (deposition zones)."""
+    ClimateHydrologyTier(geo_world, erosion_params=FAST_PARAMS).tick()
+    eroded = geo_world.rasters.read_layer(TierId.CLIMATE_HYDROLOGY, "eroded_heightmap")
+    sed = geo_world.rasters.read_layer(TierId.CLIMATE_HYDROLOGY, "sediment_depth")
+
+    median_elev = np.median(eroded)
+    low_mean = sed[eroded <= median_elev].mean()
+    high_mean = sed[eroded > median_elev].mean()
+
+    assert low_mean > high_mean, (
+        f"Low-elevation mean sediment ({low_mean:.4f}) should exceed "
+        f"high-elevation mean ({high_mean:.4f})"
+    )
+
+
+def test_hard_rock_erodes_less(geo_world):
+    """Harder bedrock types should show less erosion than softer types."""
+    ClimateHydrologyTier(geo_world, erosion_params=FAST_PARAMS).tick()
+
+    original = geo_world.rasters.read_layer(TierId.GEOLOGY, "heightmap")
+    eroded = geo_world.rasters.read_layer(TierId.CLIMATE_HYDROLOGY, "eroded_heightmap")
+    bedrock = geo_world.rasters.read_layer(TierId.GEOLOGY, "bedrock_type")
+
+    erosion = original - eroded
+
+    # Type 3 = granite (erodibility 0.3), type 2 = shale (erodibility 1.2)
+    # Compare mean erosion depth. If either type isn't present, skip.
+    hard_mask = bedrock == 3
+    soft_mask = bedrock == 2
+    if hard_mask.sum() < 100 or soft_mask.sum() < 100:
+        pytest.skip("Not enough cells of rock types 2 and 3 to compare")
+
+    hard_erosion = erosion[hard_mask].mean()
+    soft_erosion = erosion[soft_mask].mean()
+
+    assert soft_erosion > hard_erosion, (
+        f"Soft rock (type 2) erosion ({soft_erosion:.4f}) should exceed "
+        f"hard rock (type 3) erosion ({hard_erosion:.4f})"
+    )
+
+
+def test_flow_accumulation_reflects_erosion(geo_world):
+    """Post-erosion flow accumulation should differ from pre-erosion flow."""
+    from bike_sim.tiers.climate_hydrology import ClimateHydrologyTier as CHT
+
+    original_hm = geo_world.rasters.read_layer(TierId.GEOLOGY, "heightmap")
+
+    tier = CHT(geo_world, erosion_params=FAST_PARAMS)
+    tier.tick()
+
+    stored_flow = geo_world.rasters.read_layer(TierId.CLIMATE_HYDROLOGY, "flow_accumulation")
+
+    # Compute what flow would be on the original unmodified heightmap
+    pre_erosion_flow = tier._compute_flow_accumulation(original_hm)
+
+    # They should differ because erosion changed the terrain
+    assert not np.array_equal(stored_flow, pre_erosion_flow), (
+        "Post-erosion flow accumulation should differ from pre-erosion"
+    )
