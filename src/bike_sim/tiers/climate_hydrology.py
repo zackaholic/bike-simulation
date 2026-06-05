@@ -61,11 +61,20 @@ class ClimateHydrologyTier:
         if "heightmap" not in self._world.rasters.list_layers("geology"):
             raise RuntimeError("Geology must be ticked before climate-hydrology")
 
-        heightmap = self._world.rasters.read_layer("geology", "heightmap")
+        geology_heightmap = self._world.rasters.read_layer("geology", "heightmap")
         bedrock_type = self._world.rasters.read_layer("geology", "bedrock_type")
 
-        # 1. Climate envelope (unchanged).
-        temperature, precipitation = self._compute_climate(heightmap, tick_num)
+        # On subsequent ticks, erode the already-eroded surface rather than
+        # starting from the geology baseline.  This lets erosion accumulate
+        # across climate ticks — the second pass deepens channels carved by
+        # the first, which is the "process over outcome" principle.
+        if tick_num > 0 and "eroded_heightmap" in self._world.rasters.list_layers(TIER):
+            heightmap = self._world.rasters.read_layer(TIER, "eroded_heightmap")
+        else:
+            heightmap = geology_heightmap
+
+        # 1. Climate envelope (unchanged — always from geology for lapse rate).
+        temperature, precipitation = self._compute_climate(geology_heightmap, tick_num)
 
         # 2. Pre-erosion flow accumulation (for particle spawn weighting).
         pre_flow = self._compute_flow_accumulation(heightmap)
