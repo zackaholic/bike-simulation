@@ -38,13 +38,13 @@ class ErosionParams:
     """All tuneable knobs for the erosion sub-system."""
 
     # Hydraulic particle parameters
-    num_particles: int = 200_000
+    num_particles: int = 70_000
     max_lifetime: int = 50
     inertia: float = 0.1
-    capacity_factor: float = 6.0
+    capacity_factor: float = 2.0
     deposition_rate: float = 0.3
-    erosion_rate: float = 0.3
-    evaporation_rate: float = 0.02
+    erosion_rate: float = 0.1
+    evaporation_rate: float = 0.03
     gravity: float = 4.0
     min_slope: float = 0.01
     erosion_radius: int = 3
@@ -52,7 +52,7 @@ class ErosionParams:
     # Thermal erosion parameters
     thermal_passes: int = 3
     talus_slope: float = 0.6
-    creep_rate: float = 0.3
+    creep_rate: float = 0.15
 
 
 BEDROCK_ERODIBILITY: dict[int, float] = {
