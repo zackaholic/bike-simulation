@@ -245,4 +245,20 @@ This conversation was a good example of *why* the decision log matters. The init
 
 ### Scale calibration note
 
-Each tick represents 1000 simulated years. 200K particles per tick, each representing aggregate storm erosion. Starting estimate: this produces 10-50m of carving in major drainage paths. Primary tuning knobs if terrain looks wrong: `num_particles`, `erosion_rate`, `capacity_factor`.
+Each tick represents 1000 simulated years. 70K particles per tick, each representing aggregate storm erosion. After initial tuning: ~11m mean erosion per climate tick, with 99th percentile carving ~50m in major drainage paths. Primary tuning knobs if terrain looks wrong: `num_particles`, `erosion_rate`, `capacity_factor`.
+
+### Decision: erosion accumulates across climate ticks
+
+**Decision**: On tick > 0, erosion reads the previously eroded heightmap rather than the geology baseline. Each climate tick deepens channels carved by previous passes.
+
+**Why**: Caught during testing — the original implementation read the geology heightmap every tick, discarding prior bedrock carving. This made erosion non-cumulative (each tick was independent). Cumulative erosion is the whole point: the second pass preferentially deepens existing channels because flow accumulation concentrates in them, producing increasingly realistic drainage networks through process rather than placement.
+
+**Detail**: Climate envelope (temperature, precipitation) still uses the geology heightmap for lapse rate and orographic effects, since those depend on bedrock structure. Only the erosion and flow accumulation inputs use the evolving surface.
+
+### Future enhancement: intermediate version snapshots during advance
+
+**Decision (deferred)**: Currently `advance(N)` commits one version at the end, regardless of how many tier ticks occurred. A 1050-year advance produces one snapshot, not intermediate views at each ecology or climate tick.
+
+**Why this matters**: The world is experienced as snapshots — a ride at one point in time, then another ride days later at a later world date. To tune how aggressively the world changes per tick, or how much to advance between rides, you need to *see* intermediate states, not just before and after a large advance. Without intermediate snapshots, there's no way to evaluate whether 50 years of ecology produces the right amount of visible change for one ride-to-ride interval.
+
+**Future approach**: Add a `snapshot_interval` option to `advance()` (or to the Orchestrator) that commits a version every N ecology ticks or whenever a slow tier ticks. This would let the webview show the world unfolding in fine steps. The version picker and diff tooling already support arbitrary numbers of versions — this is purely an orchestrator change.
