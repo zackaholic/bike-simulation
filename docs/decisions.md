@@ -262,3 +262,154 @@ Each tick represents 1000 simulated years. 70K particles per tick, each represen
 **Why this matters**: The world is experienced as snapshots — a ride at one point in time, then another ride days later at a later world date. To tune how aggressively the world changes per tick, or how much to advance between rides, you need to *see* intermediate states, not just before and after a large advance. Without intermediate snapshots, there's no way to evaluate whether 50 years of ecology produces the right amount of visible change for one ride-to-ride interval.
 
 **Future approach**: Add a `snapshot_interval` option to `advance()` (or to the Orchestrator) that commits a version every N ecology ticks or whenever a slow tier ticks. This would let the webview show the world unfolding in fine steps. The version picker and diff tooling already support arbitrary numbers of versions — this is purely an orchestrator change.
+
+## Experience-first design principles (course correction)
+
+**Context**: The original design was simulation-first — tier timescales were chosen to match geological/ecological realism, with the rider experience assumed to follow. This produced a structural problem: the climate-hydrology tier ticks every 1,000 simulated years, but a typical ride advances ~50 years. The rider either sees no landscape change for ~20 rides, then a sudden lurch (11m of mean erosion, completely recomputed drainage), or the landscape is effectively static. Neither serves the project's emotional core.
+
+This is a set of foundational principles that refine (not replace) the original design. They represent a shift from "simulate realistically, then render" to "design the experience, then choose what to simulate."
+
+### Principle: Experience drives simulation design, not the reverse
+
+**Decision**: Every simulation decision — what to model, at what resolution, at what timescale — should be evaluated against what the rider will actually perceive and feel. Unlimited overnight compute is a resource to be spent where it most directly serves the ride experience, not on physical realism for its own sake.
+
+**Why**: Hours of compute on plant interactions that produce visible succession, shifting treelines, recovery from fire — time well spent. The same hours realistically eroding a mountain peak the rider will never perceive changing — wasted. The compute budget is unlimited but the rider's attention is not.
+
+### Principle: Change should be continuous and proportional, not stepped and lurching
+
+**Decision**: The tick system must not create artificial discontinuities. If a ride advances 50 simulated years, the world should reflect 50 years of gradual change, not zero change or 1,000 years of change applied in a lump. Big visible changes should only occur when grounded in world events (a major flood, a devastating fire season) — never as an artifact of tick boundaries.
+
+**Why**: The rider builds a relationship with a world that feels alive. Sudden unexplained lurches break that relationship. Gradual change rewards sustained attention — "is that streambed a little deeper?" is the right feeling.
+
+### Principle: Perturbations push toward interesting states, not forced novelty
+
+**Decision**: The simulation should allow (not force) unusual states: a species dominating for centuries, a wet period ravaging a landscape, a dry season producing devastating fires. Weather/climate cycles are a key mechanism for this. World rules should permit recovery from extreme states without mandating it — some worlds may enter terminal trajectories, and that's meaningful.
+
+**Why**: Forced novelty feels arbitrary. Emergent novelty from perturbation + recovery feels earned and produces "what happened here?" moments. The rider becomes a naturalist reading a landscape shaped by events, not a consumer of procedurally varied content.
+
+### Principle: Rider's perceptual scale is the resolution target
+
+**Decision**: Simulation complexity should concentrate at the scale the rider perceives: ground-level, cycling-speed, across 25-30km of terrain. Microclimates, vegetation shifts, water level changes, individual trees — these register. Continental-scale processes matter only insofar as they produce ground-level effects.
+
+**Why**: A 0.5m streambed change is noticeable at cycling speed. A 0.5m change on a distant peak is not. Compute and design effort should follow perception.
+
+### Principle: Balance consistency (relationship) with change (exploration)
+
+**Decision**: Some world features must be anchors — major landforms, geology, distinguished individuals — providing continuity so the rider recognizes "their" world. Other features — vegetation, water, weather, disturbance scars — are the source of novelty. The tick system and advancement rate must be tuned so both are present: enough stability to build attachment, enough change to sustain curiosity.
+
+**Why**: A world that changes too fast doesn't reward revisiting. A world that changes too slowly doesn't reward persistence. The rider should notice what's different against a familiar backdrop — spatial novelty (new routes) and temporal novelty (familiar places changed) are complementary.
+
+## Tick system redesign: seasonal core loop with continuous hydrology
+
+**Context**: Following the experience-first principles above, we worked through what the rider actually perceives changing and how the tick system should serve that. The key insight: the rider reads geology and hydrology *through vegetation*, just like a real naturalist. A hillside stripped of nutrients by back-to-back floods is experienced as "that species is suddenly out-competing here," not as "the sediment layer changed." Simulation design should follow the same logic.
+
+**Why these decisions are a package, not independent choices**: The original design had three tiers ticking at vastly different rates (5 years, 1000 years, 100K years). The experience problem was that climate-hydrology's 1000-year tick meant either no landscape change for ~20 rides or a sudden lurch. The fix isn't just "tick climate more often" — that would be expensive and still wouldn't produce the *kind* of change that matters to the rider. Instead: (1) make ecology seasonal so it can express seasonal strategies and respond to weather variation — this is where the rider's attention lives; (2) add a weather cycle system so ecology has something interesting to respond to — overlapping cycles produce emergent extremes without scripting; (3) make erosion a continuous side-effect of weather rather than a batched pass — this eliminates lurches and couples terrain change to the same weather that drives ecology. Each piece enables the others: seasonal ecology needs seasonal weather to be interesting; weather cycles need seasonal ecology to have visible effects; continuous erosion needs weather-driven intensity to avoid being either too uniform or too lurchy.
+
+### Decision: Seasonal ecology ticks (replacing 5-year ticks)
+
+**Decision**: Ecology ticks at seasonal resolution (~4 ticks/year, ~200 ticks per 50-year ride advance) instead of the current 5-year ticks.
+
+**Why**: Seasonal resolution isn't just more granularity — it makes the ecology model fundamentally richer. Species can have seasonal strategies (spring ephemerals, summer-drought grasses, frost-hardy evergreens). Mortality becomes seasonal (winter kill, summer drought stress). Seed bank timing matters (fire after seed set vs. before). A bad winter followed by a wet spring is a different event than the reverse. These distinctions produce the subtle ride-to-ride variation that sustains attention.
+
+**Implication**: The ecology tier needs significant rework — dormancy, phenology, seasonal growth rates, winter kill as distinct processes. This is a model change, not a parameter change.
+
+### Decision: Weather system with overlapping cycles (new subsystem)
+
+**Decision**: Replace the static climate envelope with a weather system that generates season-by-season conditions from overlapping deterministic oscillatory cycles. Cycle periods derived from world seed: short cycles (3-7 years), medium cycles (30-50 years), long cycles (200-500 years), and possibly longer.
+
+**Why**: Overlapping cycles with different frequencies produce beat patterns — rare alignments that create conditions no single cycle produces alone. A 7-year wet cycle and a 23-year warm cycle align once every ~161 years. This is the engine for world-unique emergent events: superblooms, mass die-offs, species explosions into marginal habitat. None of these are scripted; they emerge from cycle interference. Each world gets its own characteristic rhythms (from seed), so each world has its own signature rare events. The rider discovers these rhythms over months of riding — enormous emotional payoff from pure rule-following.
+
+### Decision: Hydrology as continuous weather-driven side effect (replacing batched 1000-year erosion)
+
+**Decision**: Erosion and sediment transport become a lightweight per-season operation driven by that season's weather, replacing the current 70K-particle batch pass every 1000 simulated years. Each season's rainfall drives proportional erosion. Wet years erode more; dry years almost nothing. Extreme precipitation events carve noticeably.
+
+**Why**: This eliminates the artificial lurch problem (no change for 20 rides, then sudden 11m of erosion). It couples hydrology to weather naturally — the flood that erodes a bank also kills riparian vegetation and deposits sediment that changes soil downstream. The rider sees recovery from these events over subsequent rides. Computationally, a lightweight per-season flow-and-erode step along the drainage network is much cheaper than 70K particles over the whole terrain, and the total erosion over 1000 years of seasonal application should be comparable.
+
+### Decision: Large landform changes via trivial diffusion (replacing thermal erosion passes)
+
+**Decision**: Mountain weathering and hill flattening become a tiny diffusion applied each ecology tick — essentially imperceptible per ride, subtly visible over a year of riding. Replaces the batched thermal erosion pass.
+
+**Why**: The rider never directly perceives a mountain losing 0.5m. But over a year of riding, the skyline subtly shifting contributes to the sense of deep time passing. This costs essentially nothing computationally and doesn't need physical accuracy — it's experiential, not geological.
+
+### Decision: The three-tier architecture persists but boundaries shift
+
+**Decision**: The tier structure remains, but what each tier does changes:
+- **Geology**: Unchanged — static substrate, rarely ticks. Provides bedrock, base heightmap, soil parent material.
+- **Climate-hydrology**: Splits internally. The slow *climate envelope* still drifts on century timescales. A new *weather system* generates seasonal conditions from overlapping cycles. Per-season lightweight erosion replaces batched passes. The derived-state cache becomes "current seasonal conditions" updated each season.
+- **Ecology**: Seasonal ticks. Reads current weather conditions. Experiences hydrology effects through changed soil/water/sediment. This is where the bulk of overnight compute goes.
+
+**Why**: The tier boundaries still represent real causal separation. What changes is the granularity of interaction — ecology and weather talk every season instead of ecology reading a static cache that updates every 1000 years. The event-based communication model still works; it just happens more frequently at the ecology-weather boundary.
+
+## Species genome redesign: functional + morphological traits
+
+**Context**: The seasonal ecology redesign requires expanding the species genome. The original 7-trait genome was mostly load-bearing but lacked seasonal strategy traits and had no visual representation pathway. The asset agent (Phase 10) needs enough morphological information to generate distinctive, consistent visual assets per species — and speciation needs to produce *visibly* different species, not just numerically different ones.
+
+### Decision: Split genome into functional traits (simulation) and morphological traits (visual)
+
+**Decision**: The genome contains two categories of traits. Functional traits affect simulation dynamics. Morphological traits affect visual asset generation and carry through speciation but have zero simulation cost. Some morphological traits are softly coupled to functional traits at initialization but can diverge independently during speciation.
+
+**Why**: Without morphological traits, the simulation produces rich ecological dynamics that are invisible to the rider. Species could have fascinating distribution patterns, but if they all look the same, the rider can't perceive them. The asset agent needs a species description to generate visuals, and that description needs to come from the genome — not be hand-authored — so that speciation automatically produces visibly distinct daughter species. Morphological traits drift with higher variance than functional traits during speciation because visual distinctiveness is the rider's primary tool for reading the ecology. The soft coupling to functional traits ensures species *look* ecologically plausible (drought-adapted plants have small leaves) without locking visuals to function (two drought-adapted sister species can still have different flower colors).
+
+### Functional traits (10 floats, all load-bearing)
+
+| Trait | Range | Role |
+|-------|-------|------|
+| `drought_tolerance` | [0, 1] | Suitability in low soil moisture. Trades off against growth rate in moist conditions. |
+| `frost_tolerance` | [0, 1] | Winter survival threshold. Drives warmth preference (inverse). |
+| `shade_tolerance` | [0, 1] | Competitive ability under canopy. Trades off against growth rate in full sun. |
+| `growth_rate` | [0, 1] | Speed of biomass accumulation. Trades off against lifespan and drought tolerance. |
+| `seed_mass` | [0, 1] | High = large seeds (shorter dispersal, longer seed bank, larger seedlings). Low = small seeds (wider dispersal, shorter bank, wind-dispersed). |
+| `max_height` | [0, ∞) | Canopy competition trait. Taller species cast shade on shorter ones. **Currently unused — becomes load-bearing in seasonal model.** |
+| `lifespan` | [1, ∞) | Drives base mortality rate. Long-lived species resist displacement (landscape inertia). |
+| `phenological_aggressiveness` | [0, 1] | **New.** How early the species leafs out relative to frost-safe conditions. High = spring ephemeral strategy (gains light, risks late frost). Low = conservative. |
+| `evergreenness` | [0, 1] | **New.** Fraction of leaf area retained through winter. 1.0 = full evergreen (no spring startup cost, lower peak growth). 0.0 = full deciduous. |
+| `mast_interval` | [1, 7] | **New.** Years between heavy seed crops. 1 = annual seeder. 5-7 = mast species (oaks). Creates pulsed recruitment cohorts. |
+
+### Morphological traits (7 floats, visual-only, zero simulation cost)
+
+| Trait | Range | Soft coupling | Notes |
+|-------|-------|---------------|-------|
+| `growth_form` | enum (0-4): tree, shrub, herb, grass, cushion | Derived from `max_height` + `lifespan` at creation | Primary visual category. Can drift during speciation. |
+| `leaf_size` | [0, 1] | Loosely correlated with `shade_tolerance` (+) and `drought_tolerance` (−) | Small leaves = drought/wind adapted. Large = shade adapted. |
+| `leaf_shape` | [0, 1] (needle → broad) | Correlated with `evergreenness` (evergreen trends needle) | Drives visual texture of vegetation areas. |
+| `flower_color` | [0, 1] (mapped to hue wheel) | Fully independent | **The single most visible speciation marker.** Irrelevant when `flower_size` ≈ 0 (non-flowering species). |
+| `flower_size` | [0, 1] (inconspicuous → showy) | Inversely correlated with `seed_mass` (wind-dispersed = small flowers); low for high `evergreenness` + needle-like species | At 0 = effectively non-flowering (grasses, conifers, ferns). Asset agent omits flowers entirely. |
+| `bark_texture` | [0, 1] (smooth → rough) | Correlated with `lifespan` | Long-lived species develop thicker, rougher bark. |
+| `stem_woodiness` | [0, 1] (herbaceous → woody) | Correlated with `growth_rate` (−) and `lifespan` (+) | Fast-growing short-lived = herbaceous. Slow long-lived = woody. |
+
+### Initialization and speciation behavior
+
+**Initialization**: Morphological traits are derived from functional traits via soft coupling formulas plus a random offset. A drought-tolerant species *tends* toward small leaves but might not be. Non-flowering species emerge naturally: high `evergreenness` + needle-like `leaf_shape` → low `flower_size`.
+
+**Speciation drift**: Morphological traits mutate with **higher variance** than functional traits. Two daughter species may converge on similar functional niches (same altitude, same moisture) but diverge visually. The rider sees "those are clearly related but different" — purple flowers on one side of the ridge, yellow on the other — which is how real speciation looks and is the key to the rider perceiving ecological dynamics.
+
+**Asset agent input**: The full trait vector becomes the species description prompt. Example: *"A medium shrub (1.2m), semi-evergreen, small needle-like leaves, showy purple flowers, rough bark, moderately woody stems. Grows in cold dry highlands."* When a species speciates, the child's shifted morphological traits produce a visibly related but distinct asset.
+
+### New per-cell state buffers
+
+| Buffer | Type | Purpose |
+|--------|------|---------|
+| Cumulative drought stress | float per cell | Rolling ~3-year water deficit. Multi-year droughts produce gradual forest decline, not instant switching. |
+| Biomass/establishment age | float per species per cell | How long a population has been established. Older stands resist displacement — landscape inertia. Makes old-growth feel anchored. |
+| Seed bank | float per species per cell | Already exists. Gains seasonal timing: seeds produced in fruiting season, not continuously. |
+
+### What's discarded from current model
+
+- 5-year tick structure and all rates calibrated to it
+- Static climate cache model (replaced by per-season weather)
+- Stochastic noise addition (0-0.001 per occupied cell — does nothing)
+- `distance_to_water` in suitability (loaded but never used; should become load-bearing in the new model)
+
+### Decision: Ride mapping — 1 season per minute
+
+**Decision**: Each minute of riding advances 1 simulated season (0.25 years). A 30-minute ride advances ~7.5 years. Configurable via `seasons_per_minute` setting for frequent tuning.
+
+**Why**: Much more gradual than the previous 1-year-per-minute mapping. The rider sees subtle changes per ride, meaningful shifts over weeks of riding, and long-cycle effects over months. Varying ride lengths mean the rider doesn't always land on the same season. The slower pace supports the continuity-with-change balance.
+
+### Decision: Two-phase world creation (deep history + seasonal recent history)
+
+**Decision**: World creation uses coarse ticks (existing batched system) for deep history (~200M years geology, ~200K years climate, ~10K years coarse ecology), then switches to seasonal ticks for the final ~1,000 years. The seasonal system is only used for the part of history the rider actually experiences evolving.
+
+**Why**: 200M years at 4 ticks/year = 800M ticks, which is impossible. Deep history just needs to produce plausible terrain and species radiation — it doesn't need seasonal fidelity. The transition to seasonal ticks for recent history ensures the world enters play with realistic seasonal patterns, seed banks, and weather-cycle-driven vegetation.
+
+**Full implementation spec**: `docs/seasonal-redesign-spec.md`
