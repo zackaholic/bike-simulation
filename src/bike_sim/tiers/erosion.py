@@ -474,3 +474,136 @@ def erode_thermal(
         # Clip to valid ranges.
         np.clip(sediment, 0, None, out=sediment)
         np.clip(heightmap, 0, None, out=heightmap)
+
+
+# ------------------------------------------------------------------
+# Per-season erosion (lightweight, called every seasonal tick)
+# ------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class SeasonalErosionParams:
+    """Parameters for lightweight per-season erosion."""
+
+    # Erosion strength: calibrated so 4000 ticks ≈ current batch (11m mean)
+    # 11m / 4000 = 0.00275m per tick mean target
+    erosion_scale: float = 0.003  # m of erosion per unit erosion_potential
+
+    # Deposition: fraction of eroded material deposited where slope decreases
+    deposition_fraction: float = 0.7
+
+    # Thermal diffusion rate: ~0.001mm per tick
+    diffusion_rate: float = 1e-6  # m per tick (applied via laplacian)
+
+    # Storm scale factor for storm_intensity → erosion multiplier
+    storm_scale: float = 2.0
+
+
+def erode_seasonal(
+    heightmap: np.ndarray,
+    sediment: np.ndarray,
+    flow_accumulation: np.ndarray,
+    precipitation: np.ndarray,
+    storm_intensity: float,
+    bedrock_type: np.ndarray,
+    params: SeasonalErosionParams | None = None,
+) -> None:
+    """Lightweight per-season erosion. Modifies heightmap and sediment in-place.
+
+    Algorithm:
+    1. Compute erosion potential per cell = flow_acc * precip * storm * slope * erodibility
+    2. Erode: remove material proportional to potential (sediment first, then bedrock)
+    3. Deposit: material deposited where slope decreases (simple downhill redistribution)
+
+    Calibrated so ~4000 ticks produces ~11m mean erosion (matching the batch system).
+    """
+    if params is None:
+        params = SeasonalErosionParams()
+
+    rows, cols = heightmap.shape
+    combined = heightmap + sediment
+
+    # 1. Compute slope magnitude
+    dy, dx = np.gradient(combined, 50.0)  # 50m cell size
+    slope = np.sqrt(dx**2 + dy**2)
+    slope = np.clip(slope, 0.001, None)  # minimum slope to prevent div-by-zero
+
+    # 2. Compute erodibility from bedrock type
+    erodibility = np.ones_like(heightmap)
+    for btype, erod_val in BEDROCK_ERODIBILITY.items():
+        erodibility = np.where(bedrock_type == btype, erod_val, erodibility)
+
+    # 3. Normalize flow accumulation and precipitation
+    flow_norm = np.log1p(flow_accumulation) / np.log1p(flow_accumulation.max() + 1)
+    precip_norm = precipitation / (precipitation.mean() + 1e-10)
+
+    # 4. Erosion potential
+    erosion_potential = (
+        flow_norm
+        * precip_norm
+        * (1.0 + storm_intensity * params.storm_scale)
+        * slope
+        * erodibility
+        * params.erosion_scale
+    )
+
+    # 5. Erode: remove from sediment first, then bedrock
+    erode_from_sed = np.minimum(erosion_potential, sediment)
+    remaining = erosion_potential - erode_from_sed
+    erode_from_rock = remaining * erodibility  # harder rock resists more
+
+    sediment -= erode_from_sed
+    heightmap -= erode_from_rock
+
+    total_eroded = erode_from_sed + erode_from_rock
+
+    # 6. Deposit where slope is low (simple: deposit proportional to inverse slope)
+    # Material moves downhill; deposited where slope decreases
+    deposition = total_eroded * params.deposition_fraction
+    # Smooth the deposition to simulate downhill transport
+    # Use a simple 3x3 averaging to spread deposits
+    padded = np.pad(deposition, 1, mode="edge")
+    smoothed_dep = (
+        padded[:-2, :-2] + padded[:-2, 1:-1] + padded[:-2, 2:]
+        + padded[1:-1, :-2] + padded[1:-1, 1:-1] + padded[1:-1, 2:]
+        + padded[2:, :-2] + padded[2:, 1:-1] + padded[2:, 2:]
+    ) / 9.0
+
+    # Deposit preferentially where slope is low
+    inverse_slope = 1.0 / (slope + 0.1)
+    deposit_weight = inverse_slope / (inverse_slope.mean() + 1e-10)
+    deposit_weight = np.clip(deposit_weight, 0, 3.0)  # cap to prevent extreme deposits
+
+    sediment += smoothed_dep * deposit_weight
+
+    # Ensure non-negative
+    np.clip(sediment, 0, None, out=sediment)
+    np.clip(heightmap, 0, None, out=heightmap)
+
+
+def thermal_diffusion(
+    heightmap: np.ndarray,
+    sediment: np.ndarray,
+    diffusion_rate: float = 1e-6,
+) -> None:
+    """Tiny diffusion applied each tick — imperceptible per ride, visible over years.
+
+    Approximates laplacian diffusion on the combined surface.
+    Over 4000 ticks (~1000 years), produces ~4mm of smoothing on sharp features.
+    Over 400K ticks (~100K years), visible skyline changes.
+    """
+    combined = heightmap + sediment
+
+    # Laplacian via 3x3 kernel: center - average of neighbors
+    padded = np.pad(combined, 1, mode="edge")
+    laplacian = (
+        padded[:-2, 1:-1] + padded[2:, 1:-1]  # N + S
+        + padded[1:-1, :-2] + padded[1:-1, 2:]  # W + E
+        - 4.0 * padded[1:-1, 1:-1]
+    )
+
+    # Apply diffusion to sediment (not bedrock — sediment moves easier)
+    change = laplacian * diffusion_rate
+    sediment += change
+
+    # Ensure non-negative
+    np.clip(sediment, 0, None, out=sediment)
