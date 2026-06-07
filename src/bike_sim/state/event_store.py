@@ -157,6 +157,7 @@ class EventStore:
             "y": row["y"],
             "appeared_year": row["appeared_year"],
             "died_year": row["died_year"],
+            "state": row["state"],
         }
 
     def kill_individual(self, individual_id: str, died_year: float) -> None:
@@ -164,6 +165,14 @@ class EventStore:
         self._conn.execute(
             "UPDATE individuals SET died_year = ? WHERE individual_id = ?",
             (died_year, individual_id),
+        )
+        self._conn.commit()
+
+    def update_individual_state(self, individual_id: str, state: str) -> None:
+        """Update an individual's lifecycle state (alive/snag/log/mound/removed)."""
+        self._conn.execute(
+            "UPDATE individuals SET state = ? WHERE individual_id = ?",
+            (state, individual_id),
         )
         self._conn.commit()
 
@@ -205,6 +214,7 @@ class EventStore:
                         "y": row["y"],
                         "appeared_year": row["appeared_year"],
                         "died_year": row["died_year"],
+                        "state": row["state"],
                     }
                 )
         return results
@@ -266,7 +276,8 @@ class EventStore:
                 x            REAL NOT NULL,
                 y            REAL NOT NULL,
                 appeared_year REAL DEFAULT 0.0,
-                died_year    REAL
+                died_year    REAL,
+                state        TEXT DEFAULT 'alive'
             );
 
             CREATE INDEX IF NOT EXISTS idx_individuals_xy
@@ -294,6 +305,7 @@ class EventStore:
         for stmt in [
             "ALTER TABLE individuals ADD COLUMN died_year REAL",
             "ALTER TABLE species ADD COLUMN extinct_year REAL",
+            "ALTER TABLE individuals ADD COLUMN state TEXT DEFAULT 'alive'",
         ]:
             try:
                 self._conn.execute(stmt)

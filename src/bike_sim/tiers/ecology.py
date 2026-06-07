@@ -291,6 +291,9 @@ class EcologyTier:
         self._update_cumulative_drought(weather)
         self._update_biomass_age(species_list, densities)
 
+        # Individual lifecycle (aging, death, post-mortem transitions)
+        self._update_individual_lifecycle(tick_num)
+
         # Enforce carrying capacity
         self._enforce_carrying_capacity(densities)
 
@@ -657,6 +660,20 @@ class EcologyTier:
                     kill_fraction = float(rng.uniform(0.7, 0.95))
                     densities[sid] = np.where(burned, densities[sid] * (1 - kill_fraction), densities[sid])
 
+                # Kill individuals in burned area
+                for ind in self._world.events.find_individuals_near(
+                    25000, 25000, 50000
+                ):
+                    if ind.get("state") != "alive":
+                        continue
+                    col = int(ind["x"] / self.CELL_SIZE)
+                    row = int(ind["y"] / self.CELL_SIZE)
+                    if 0 <= row < self.GRID_SIZE and 0 <= col < self.GRID_SIZE:
+                        if burned[row, col]:
+                            if rng.random() < 0.7:  # 70% kill chance in fire
+                                self._world.events.kill_individual(ind["individual_id"], current_year)
+                                self._world.events.update_individual_state(ind["individual_id"], "snag")
+
     def _seed_production_and_dispersal(
         self,
         weather: SeasonalWeather,
@@ -765,6 +782,21 @@ class EcologyTier:
                     kill_fraction = float(rng.uniform(0.4, 0.8))
                     densities[sid] = np.where(affected, densities[sid] * (1 - kill_fraction), densities[sid])
 
+                # Kill individuals in blowdown area
+                for ind in self._world.events.find_individuals_near(
+                    float(bd_col * self.CELL_SIZE), float(bd_row * self.CELL_SIZE),
+                    float(patch_radius * self.CELL_SIZE * 1.5)
+                ):
+                    if ind.get("state") != "alive":
+                        continue
+                    col = int(ind["x"] / self.CELL_SIZE)
+                    row = int(ind["y"] / self.CELL_SIZE)
+                    if 0 <= row < self.GRID_SIZE and 0 <= col < self.GRID_SIZE:
+                        if affected[row, col]:
+                            if rng.random() < 0.5:  # 50% kill chance in blowdown
+                                self._world.events.kill_individual(ind["individual_id"], current_year)
+                                self._world.events.update_individual_state(ind["individual_id"], "snag")
+
     # ── fire spread ──────────────────────────────────────────────
 
     def _spread_fire(
@@ -853,6 +885,54 @@ class EcologyTier:
             age = np.where(densities[sid] < 0.01, age * 0.9, age)  # decay where absent
 
             store.write_layer(TIER, layer, age.astype(np.float64), tick_num)
+
+    # ── individual lifecycle ────────────────────────────────────────
+
+    def _update_individual_lifecycle(self, tick_num: int) -> None:
+        """Age individuals, check for death, transition post-mortem states."""
+        rng = create_rng(self._world.seed, "ecology", "lifecycle", tick_num)
+        current_year = self._world.tier_clocks[TIER].simulated_year
+
+        # Get all individuals (alive and post-mortem)
+        all_individuals = self._world.events.find_individuals_near(
+            25000, 25000, 50000  # full world extent
+        )
+
+        for ind in all_individuals:
+            state = ind.get("state", "alive")
+
+            if state == "alive":
+                # Check age-based death
+                age = current_year - ind["appeared_year"]
+                species_data = self._world.events.get_species(ind["species_id"])
+                lifespan = species_data["genome"].get("lifespan", 100.0)
+
+                # Stochastic death: probability increases as age approaches lifespan
+                # At lifespan, ~50% chance per tick. At 1.5*lifespan, very high.
+                if age > lifespan * 0.7:
+                    death_prob = 0.01 * ((age / lifespan) ** 3)
+                    death_prob = min(death_prob, 0.5)  # cap at 50% per tick
+                    if rng.random() < death_prob:
+                        self._world.events.kill_individual(ind["individual_id"], current_year)
+                        self._world.events.update_individual_state(ind["individual_id"], "snag")
+
+            elif state == "snag":
+                # Snag for ~10 years, then becomes log
+                died_year = ind.get("died_year")
+                if died_year is not None and (current_year - died_year) > 10:
+                    self._world.events.update_individual_state(ind["individual_id"], "log")
+
+            elif state == "log":
+                # Log for ~50 years, then becomes mound
+                died_year = ind.get("died_year")
+                if died_year is not None and (current_year - died_year) > 60:  # 10 snag + 50 log
+                    self._world.events.update_individual_state(ind["individual_id"], "mound")
+
+            elif state == "mound":
+                # Mound for ~200 years, then removed
+                died_year = ind.get("died_year")
+                if died_year is not None and (current_year - died_year) > 260:  # 10+50+200
+                    self._world.events.update_individual_state(ind["individual_id"], "removed")
 
     # ── state loading / writing ───────────────────────────────────
 
