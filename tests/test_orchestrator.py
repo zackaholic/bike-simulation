@@ -1,4 +1,4 @@
-"""Tests for the Orchestrator — scheduling ticks across all three simulation tiers."""
+"""Tests for the Orchestrator — seasonal tick loop across all three simulation tiers."""
 
 import numpy as np
 import pytest
@@ -32,7 +32,7 @@ def ready_world(tmp_path):
 def test_create_world_ticks_geology_and_climate(orch):
     """After create_world(), geology=1 tick, climate_hydrology=1 tick, ecology=0."""
     orch.create_world()
-    world = orch._world if hasattr(orch, "_world") else orch.world
+    world = orch._world
 
     assert world.tier_clocks["geology"].tick_number == 1
     assert world.tier_clocks["climate_hydrology"].tick_number == 1
@@ -42,39 +42,19 @@ def test_create_world_ticks_geology_and_climate(orch):
 def test_create_world_produces_heightmap(orch):
     """After create_world(), the geology heightmap layer should exist."""
     orch.create_world()
-    world = orch._world if hasattr(orch, "_world") else orch.world
-
+    world = orch._world
     assert "heightmap" in world.rasters.list_layers("geology")
 
 
 def test_advance_5_years(ready_world):
-    """advance(5) should tick ecology 20 times (5/0.25), no extra climate tick."""
+    """advance(5) should produce 20 seasonal ticks (5 / 0.25)."""
     world, orch = ready_world
 
     result = orch.advance(5)
 
     assert result["ecology_ticks"] == 20
-    assert result["climate_hydrology_ticks"] == 0
-    assert result["geology_ticks"] == 0
-    # Ecology clock should reflect 20 ticks.
+    assert result["seasons_advanced"] == 20
     assert world.tier_clocks["ecology"].tick_number == 20
-
-
-def test_advance_triggers_climate_tick(ready_world):
-    """Advancing past the 1000-year threshold should trigger a climate-hydrology tick."""
-    world, orch = ready_world
-
-    # Fast-forward ecology clock close to the climate threshold (1000 years)
-    # so we don't need to run many slow ecology ticks in the test.
-    world.tier_clocks["ecology"].simulated_year = 995.0
-    world.tier_clocks["ecology"].tick_number = 199
-
-    # A small advance should push us past 1000 and trigger a climate tick.
-    result = orch.advance(10)
-
-    assert result["climate_hydrology_ticks"] >= 1
-    # Climate clock was at 1 after create_world; should now be >= 2.
-    assert world.tier_clocks["climate_hydrology"].tick_number >= 2
 
 
 def test_advance_small_increments(tmp_path):
@@ -102,34 +82,33 @@ def test_advance_small_increments(tmp_path):
 
 
 def test_advance_returns_summary(ready_world):
-    """advance() return dict should contain the four required keys."""
+    """advance() return dict should contain the required keys."""
     _world, orch = ready_world
     result = orch.advance(5)
 
     assert "years_advanced" in result
     assert "ecology_ticks" in result
-    assert "climate_hydrology_ticks" in result
-    assert "geology_ticks" in result
+    assert "seasons_advanced" in result
     assert result["years_advanced"] == pytest.approx(5.0)
 
 
 def test_advance_ride(ready_world):
-    """advance_ride(5) should advance ~5 years → 20 ecology ticks."""
+    """advance_ride(20) should advance 20 seasons (5 years)."""
     _world, orch = ready_world
-    result = orch.advance_ride(5)
+    result = orch.advance_ride(20)
 
-    assert result["ecology_ticks"] == 20
+    # 20 minutes * 1 season/minute = 20 seasons = 5 years
+    assert result["seasons_advanced"] == 20
     assert result["years_advanced"] == pytest.approx(5.0)
 
 
 def test_advance_ride_capped(ready_world):
-    """advance_ride(120) should cap at 50 years."""
+    """advance_ride(200) should cap at MAX_SEASONS_PER_RIDE (120 seasons = 30 years)."""
     _world, orch = ready_world
-    result = orch.advance_ride(120)
+    result = orch.advance_ride(200)
 
-    assert result["years_advanced"] == pytest.approx(50.0)
-    # 50 years / 0.25 years per tick = 200 ecology ticks.
-    assert result["ecology_ticks"] == 200
+    assert result["seasons_advanced"] == 120
+    assert result["years_advanced"] == pytest.approx(30.0)
 
 
 # ── Reproducibility ──────────────────────────────────────────────────
@@ -251,3 +230,28 @@ def test_advance_after_reopen(tmp_path):
     assert result["ecology_ticks"] == 20
     assert world2.tier_clocks["ecology"].tick_number == eco_ticks_before + 20
     world2.close()
+
+
+# ── Seasonal erosion integration ─────────────────────────────────────
+
+
+def test_advance_updates_terrain(ready_world):
+    """After advancing, eroded_heightmap and sediment_depth should be updated."""
+    world, orch = ready_world
+    result = orch.advance(5)
+
+    # Should have written terrain layers
+    ch_layers = world.rasters.list_layers("climate_hydrology")
+    assert "eroded_heightmap" in ch_layers
+    assert "sediment_depth" in ch_layers
+    assert "flow_accumulation" in ch_layers
+
+
+def test_advance_seasons_direct(ready_world):
+    """advance_seasons() should work with explicit season count."""
+    world, orch = ready_world
+    result = orch.advance_seasons(8)
+
+    assert result["seasons_advanced"] == 8
+    assert result["ecology_ticks"] == 8
+    assert result["years_advanced"] == pytest.approx(2.0)

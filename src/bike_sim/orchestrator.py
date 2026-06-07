@@ -1,122 +1,191 @@
-"""Orchestrator — bridge between ride logs and the three-tier simulation.
+"""Orchestrator — seasonal tick loop bridging ride logs and the three-tier simulation.
 
 The Orchestrator coordinates geology, climate-hydrology, and ecology tiers
-for a given time advance.  Instead of manually ticking each tier, callers
-say "advance 50 years" (or "advance a 30-minute ride") and the orchestrator
-figures out the right number of ticks at each tier's timescale.
+using seasonal ticks as the core simulation loop. Each tick represents one
+season (0.25 years). Weather is generated per-tick from deterministic cycles,
+and lightweight erosion is applied continuously as a side effect of weather.
 
-Tick ordering follows the architecture: ecology ticks first (fastest),
-climate-hydrology when enough ecology years have accumulated, and geology
-only when climate-hydrology years cross the geology threshold (very rare
-during normal play).
+Tick ordering per season:
+1. Generate weather (from WeatherSystem)
+2. Tick ecology (receives weather)
+3. Seasonal erosion (driven by storm_intensity)
+4. Thermal diffusion
+5. Recompute flow accumulation (every FLOW_RECOMPUTE_INTERVAL ticks)
+6. Advance clock (season cycles 0-3, year increments when season wraps)
 """
 
 from __future__ import annotations
 
+import numpy as np
+
 from bike_sim.tiers.climate_hydrology import ClimateHydrologyTier
 from bike_sim.tiers.ecology import EcologyTier
-from bike_sim.tiers.erosion import ErosionParams
+from bike_sim.tiers.erosion import (
+    ErosionParams,
+    SeasonalErosionParams,
+    erode_seasonal,
+    thermal_diffusion,
+)
 from bike_sim.tiers.geology import GeologyTier
 from bike_sim.weather import WeatherSystem
 from bike_sim.world import World
 
 
 class Orchestrator:
-    """Schedule ticks across all three simulation tiers."""
+    """Schedule ticks across all three simulation tiers using seasonal loop."""
 
-    RIDE_YEARS_PER_MINUTE: float = 1.0
-    RIDE_MAX_YEARS: float = 50.0
+    SEASONS_PER_MINUTE: float = 1.0  # 1 season per minute of riding
+    MAX_SEASONS_PER_RIDE: int = 120  # cap at 30 simulated years
+    FLOW_RECOMPUTE_INTERVAL: int = 40  # recompute flow every 40 ticks (~10 years)
 
-    def __init__(self, world: World, erosion_params: ErosionParams | None = None) -> None:
+    # Legacy constants kept for backward compatibility
+    RIDE_YEARS_PER_MINUTE: float = 0.25  # 1 season = 0.25 years per minute
+    RIDE_MAX_YEARS: float = 30.0  # 120 seasons * 0.25
+
+    def __init__(
+        self,
+        world: World,
+        erosion_params: ErosionParams | None = None,
+        seasonal_erosion_params: SeasonalErosionParams | None = None,
+        seasonal_history_ticks: int = 0,
+    ) -> None:
         self._world = world
         self._erosion_params = erosion_params
+        self._seasonal_erosion_params = seasonal_erosion_params or SeasonalErosionParams()
+        self._seasonal_history_ticks = seasonal_history_ticks
 
     def create_world(self) -> None:
-        """Initialize world by ticking geology and climate-hydrology once.
+        """Two-phase world creation: deep history (coarse) + seasonal recent history.
 
-        Ecology is *not* ticked here — it starts from zero when the first
-        ``advance()`` call runs.  Creates version 0 to snapshot the initial
-        world state.
+        Phase A: Geology + climate-hydrology (batched erosion, as before)
+        Phase B: Run seasonal_history_ticks of seasonal ecology+erosion
         """
         next_version = self._world.current_version + 1
         self._world.rasters.set_version(next_version)
 
+        # Phase A: Deep history
         GeologyTier(self._world).tick()
         ClimateHydrologyTier(self._world, erosion_params=self._erosion_params).tick()
+
+        # Phase B: Seasonal recent history (configurable, default 0 for backward compat)
+        if self._seasonal_history_ticks > 0:
+            self._advance_seasonal(self._seasonal_history_ticks)
 
         self._world.commit_version(trigger="create_world")
 
     def advance(self, years: float) -> dict:
-        """Advance simulation by the given number of years using seasonal ticks.
+        """Advance by years (converted to seasonal ticks internally).
 
-        Each tick = 1 season (0.25 years). Weather is generated per-tick from
-        the WeatherSystem. Climate-hydrology and geology tick thresholds are
-        checked but rarely triggered during normal advancement.
-
-        Returns a summary dict with tick counts.
+        Backward-compatible: still accepts years, returns dict with
+        years_advanced and ecology_ticks keys.
         """
+        num_seasons = int(years / 0.25)
+        return self.advance_seasons(num_seasons)
+
+    def advance_seasons(self, num_seasons: int) -> dict:
+        """Advance by a specific number of seasonal ticks."""
         next_version = self._world.current_version + 1
         self._world.rasters.set_version(next_version)
 
+        self._advance_seasonal(num_seasons)
+
+        self._world.commit_version(trigger=f"advance {num_seasons} seasons")
+        return {
+            "years_advanced": num_seasons * 0.25,
+            "ecology_ticks": num_seasons,
+            "seasons_advanced": num_seasons,
+        }
+
+    def advance_ride(self, ride_duration_minutes: float) -> dict:
+        """Convert ride duration to seasonal ticks and advance.
+
+        Uses SEASONS_PER_MINUTE (1.0) to convert, capped at
+        MAX_SEASONS_PER_RIDE (120) so a long ride doesn't skip too much
+        world history.
+        """
+        seasons = min(
+            int(ride_duration_minutes * self.SEASONS_PER_MINUTE),
+            self.MAX_SEASONS_PER_RIDE,
+        )
+        return self.advance_seasons(max(1, seasons))
+
+    def _advance_seasonal(self, num_seasons: int) -> None:
+        """Internal: run the seasonal loop without version management."""
         eco = EcologyTier(self._world)
         heightmap = self._world.rasters.read_layer("geology", "heightmap")
         weather_sys = WeatherSystem(self._world.seed, heightmap)
 
-        num_seasons = int(years / EcologyTier.YEARS_PER_TICK)
+        # Load mutable terrain state
+        store = self._world.rasters
+        ch_layers = store.list_layers("climate_hydrology")
 
-        climate_ticks = 0
-        geology_ticks = 0
+        if "eroded_heightmap" in ch_layers:
+            eroded_hm = store.read_layer("climate_hydrology", "eroded_heightmap").copy()
+        else:
+            eroded_hm = heightmap.copy()
+
+        if "sediment_depth" in ch_layers:
+            sediment = store.read_layer("climate_hydrology", "sediment_depth").copy()
+        else:
+            sediment = np.zeros_like(heightmap)
+
+        if "flow_accumulation" in ch_layers:
+            flow_acc = store.read_layer("climate_hydrology", "flow_accumulation").copy()
+        else:
+            flow_acc = np.ones_like(heightmap)
+
+        bedrock_type = self._world.rasters.read_layer("geology", "bedrock_type")
 
         eco_clock = self._world.tier_clocks["ecology"]
-        climate_clock = self._world.tier_clocks["climate_hydrology"]
-        geology_clock = self._world.tier_clocks["geology"]
+        ticks_since_flow_recompute = 0
 
-        for _ in range(num_seasons):
-            # Generate weather for current time
+        for i in range(num_seasons):
             year = eco_clock.simulated_year
             season = eco_clock.tick_number % 4
+
+            # 1. Generate weather
             weather = weather_sys.generate(year, season)
 
+            # 2. Tick ecology
             eco.tick(weather)
 
-            # Climate-hydrology should tick once per 1000 ecology-years.
-            # The initial tick from create_world() doesn't count — it
-            # bootstraps the climate state before ecology starts.
-            expected_climate = int(eco_clock.simulated_year // ClimateHydrologyTier.YEARS_PER_TICK)
-            # Ticks beyond the initial bootstrap tick.
-            actual_extra_climate = climate_clock.tick_number - 1
-            if expected_climate > actual_extra_climate:
-                ClimateHydrologyTier(self._world, erosion_params=self._erosion_params).tick()
-                climate_ticks += 1
+            # 3. Seasonal erosion
+            erode_seasonal(
+                eroded_hm,
+                sediment,
+                flow_acc,
+                weather.precipitation,
+                weather.storm_intensity,
+                bedrock_type,
+                self._seasonal_erosion_params,
+            )
 
-                # Similarly for geology relative to climate years.
-                expected_geology = int(climate_clock.simulated_year // GeologyTier.YEARS_PER_TICK)
-                actual_extra_geology = geology_clock.tick_number - 1
-                if expected_geology > actual_extra_geology:
-                    GeologyTier(self._world).tick()
-                    geology_ticks += 1
+            # 4. Thermal diffusion
+            thermal_diffusion(eroded_hm, sediment)
 
-        self._world.commit_version(trigger=f"advance {years} years")
+            # 5. Recompute flow if needed
+            ticks_since_flow_recompute += 1
+            if ticks_since_flow_recompute >= self.FLOW_RECOMPUTE_INTERVAL:
+                combined = eroded_hm + sediment
+                flow_acc = self._compute_flow_accumulation(combined)
+                ticks_since_flow_recompute = 0
 
-        return {
-            "years_advanced": years,
-            "ecology_ticks": num_seasons,
-            "climate_hydrology_ticks": climate_ticks,
-            "geology_ticks": geology_ticks,
-        }
-
-    def advance_ride(self, ride_duration_minutes: float) -> dict:
-        """Convert ride duration to sim years and advance.
-
-        Uses ``RIDE_YEARS_PER_MINUTE`` (1.0) to convert, capped at
-        ``RIDE_MAX_YEARS`` (50.0) so a long ride doesn't skip too much
-        world history.
-        """
-        years = min(
-            ride_duration_minutes * self.RIDE_YEARS_PER_MINUTE,
-            self.RIDE_MAX_YEARS,
+        # Write final terrain state
+        tick_num = eco_clock.tick_number  # already advanced by eco.tick()
+        store.write_layer(
+            "climate_hydrology", "eroded_heightmap", eroded_hm.astype(np.float64), tick_num
         )
-        return self.advance(years)
+        store.write_layer(
+            "climate_hydrology", "sediment_depth", sediment.astype(np.float64), tick_num
+        )
+        store.write_layer(
+            "climate_hydrology", "flow_accumulation", flow_acc.astype(np.float64), tick_num
+        )
+
+    def _compute_flow_accumulation(self, heightmap: np.ndarray) -> np.ndarray:
+        """D8 flow accumulation — reuses ClimateHydrologyTier's implementation."""
+        ch = ClimateHydrologyTier(self._world, erosion_params=self._erosion_params)
+        return ch._compute_flow_accumulation(heightmap)
 
     def introduce_fire(self, x: float, y: float) -> None:
         """Manually trigger a fire event at the given world coordinates."""
