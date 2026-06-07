@@ -1,20 +1,23 @@
-"""Ecology simulation tier — species establishment, population dynamics, and niche differentiation.
+"""Ecology simulation tier — seasonal species dynamics, disturbance, and niche differentiation.
 
-This is the third and topmost tier in the three-tier simulation stack, reading
-climate-hydrology derived state and producing per-species density fields and
-a seed bank.  Phase 6 implements basic ecology: ancestor species creation,
-suitability-driven establishment, logistic growth with competition, simple
-dispersal, and a persistent seed bank.  Phase 7 adds distinguished individuals,
-speciation via population fragmentation, and disturbance regimes (fire, blowdown).
+This is the third and topmost tier in the three-tier simulation stack.  It
+receives a ``SeasonalWeather`` object each tick and produces per-species density
+fields, seed banks, and disturbance events.
+
+The tier operates at **0.25 years per tick** (one season).  Each tick runs
+season-specific operations:
+
+- **Winter (0):** frost-driven mortality.
+- **Spring (1):** leaf-out risk, seed bank establishment.
+- **Summer (2):** growth/competition, drought mortality, fire disturbance.
+- **Fall (3):** seed production/dispersal, senescence, blowdown disturbance.
+
+Every tick also updates cumulative drought stress, biomass age tracking, and
+enforces carrying capacity.  Individual promotion runs annually (every 4 ticks)
+and speciation checks run every 50 years (200 ticks).
 
 All randomness flows through ``create_rng`` with tier_id="ecology" and
 distinct pass_ids, ensuring full reproducibility from the world seed.
-
-The tier operates at 5 years per tick.  Each tick reads the climate-hydrology
-cache, computes per-species suitability surfaces, runs population dynamics,
-applies disturbance events, promotes distinguished individuals, and periodically
-checks for speciation.  Results are written as density layers plus a combined
-seed-bank layer to the "ecology" namespace in the RasterStore.
 """
 
 from __future__ import annotations
@@ -23,19 +26,20 @@ import numpy as np
 from numpy.typing import NDArray
 
 from bike_sim.rng import create_rng
+from bike_sim.weather import SeasonalWeather
 from bike_sim.world import World
 
 TIER = "ecology"
 
-# Climate layers the ecology tier reads from climate_hydrology.
-_CLIMATE_LAYERS = (
-    "soil_moisture_summer",
-    "soil_moisture_winter",
-    "frost_days",
-    "growing_degree_days",
-    "solar_insolation",
-    "distance_to_water",
-)
+# Trait categories for speciation drift.
+_MORPHOLOGICAL_TRAITS = {
+    "growth_form", "leaf_size", "leaf_shape", "flower_color",
+    "flower_size", "bark_texture", "stem_woodiness",
+}
+_BOUNDED_FUNCTIONAL = {
+    "drought_tolerance", "frost_tolerance", "shade_tolerance",
+    "growth_rate", "seed_mass", "phenological_aggressiveness", "evergreenness",
+}
 
 # Archetype trait templates: (name, genome dict before perturbation).
 _ANCESTOR_TEMPLATES: list[tuple[str, dict]] = [
@@ -49,6 +53,9 @@ _ANCESTOR_TEMPLATES: list[tuple[str, dict]] = [
             "seed_mass": 0.1,
             "max_height": 0.5,
             "lifespan": 10.0,
+            "phenological_aggressiveness": 0.7,
+            "evergreenness": 0.1,
+            "mast_interval": 1,
         },
     ),
     (
@@ -61,6 +68,9 @@ _ANCESTOR_TEMPLATES: list[tuple[str, dict]] = [
             "seed_mass": 0.15,
             "max_height": 0.8,
             "lifespan": 15.0,
+            "phenological_aggressiveness": 0.4,
+            "evergreenness": 0.3,
+            "mast_interval": 1,
         },
     ),
     (
@@ -73,6 +83,9 @@ _ANCESTOR_TEMPLATES: list[tuple[str, dict]] = [
             "seed_mass": 0.75,
             "max_height": 25.0,
             "lifespan": 300.0,
+            "phenological_aggressiveness": 0.3,
+            "evergreenness": 0.2,
+            "mast_interval": 4,
         },
     ),
     (
@@ -85,6 +98,9 @@ _ANCESTOR_TEMPLATES: list[tuple[str, dict]] = [
             "seed_mass": 0.4,
             "max_height": 3.0,
             "lifespan": 60.0,
+            "phenological_aggressiveness": 0.2,
+            "evergreenness": 0.7,
+            "mast_interval": 2,
         },
     ),
     (
@@ -97,6 +113,9 @@ _ANCESTOR_TEMPLATES: list[tuple[str, dict]] = [
             "seed_mass": 0.05,
             "max_height": 0.3,
             "lifespan": 5.0,
+            "phenological_aggressiveness": 0.8,
+            "evergreenness": 0.0,
+            "mast_interval": 1,
         },
     ),
     (
@@ -109,6 +128,9 @@ _ANCESTOR_TEMPLATES: list[tuple[str, dict]] = [
             "seed_mass": 0.2,
             "max_height": 0.1,
             "lifespan": 80.0,
+            "phenological_aggressiveness": 0.1,
+            "evergreenness": 0.8,
+            "mast_interval": 3,
         },
     ),
 ]
@@ -223,11 +245,10 @@ def _connected_components_coarse(
 
 
 class EcologyTier:
-    """Ecology tier: ancestor species, suitability, competition, seed bank,
-    distinguished individuals, speciation, and disturbance."""
+    """Ecology tier: seasonal species dynamics, disturbance, and niche differentiation."""
 
     GRID_SIZE: int = 1000
-    YEARS_PER_TICK: int = 5
+    YEARS_PER_TICK: float = 0.25
     NUM_ANCESTORS: int = 6  # within the test-required 5-8 range
     CELL_SIZE: float = 50.0  # meters per grid cell (50 km / 1000 cells)
 
@@ -236,32 +257,52 @@ class EcologyTier:
 
     # ── public API ─────────────────────────────────────────────────
 
-    def tick(self) -> None:
-        """Advance the ecology tier by one tick."""
+    def tick(self, weather: SeasonalWeather) -> None:
+        """Advance ecology by one seasonal tick."""
         clock = self._world.tier_clocks[TIER]
         tick_num = clock.tick_number
-
-        # Guard: climate-hydrology must have been run.
-        if "temperature" not in self._world.rasters.list_layers("climate_hydrology"):
-            raise RuntimeError("Climate-hydrology must be ticked before ecology")
+        season = weather.season  # 0=winter, 1=spring, 2=summer, 3=fall
 
         # On first tick, seed ancestor species and initial populations.
         if tick_num == 0:
             self._create_ancestors(tick_num)
-            self._seed_initial_populations(tick_num)
+            self._seed_initial_populations(tick_num, weather)
 
-        # Run one round of population dynamics.
-        self._update_populations(tick_num)
+        # Load all species state
+        species_list = self._world.events.list_species()
+        densities, seed_banks = self._load_species_state(species_list)
 
-        # Phase 7: Disturbance (fire, blowdown) — skip on first tick.
-        if tick_num > 0:
-            self._run_disturbance(tick_num)
+        # Season-specific operations
+        if season == 0:  # Winter
+            self._winter_mortality(weather, species_list, densities)
+        elif season == 1:  # Spring
+            self._spring_leafout_and_frost(weather, species_list, densities)
+            self._spring_establishment(weather, species_list, densities, seed_banks)
+        elif season == 2:  # Summer
+            self._summer_growth_and_competition(weather, species_list, densities, tick_num)
+            self._summer_drought_mortality(weather, species_list, densities)
+            self._fire_disturbance(weather, species_list, densities, tick_num)
+        elif season == 3:  # Fall
+            self._seed_production_and_dispersal(weather, species_list, densities, seed_banks, tick_num)
+            self._senescence_and_fuel(weather, species_list, densities)
+            self._blowdown_disturbance(weather, species_list, densities, tick_num)
 
-        # Phase 7: Distinguished individuals.
-        self._promote_individuals(tick_num)
+        # Every tick:
+        self._update_cumulative_drought(weather)
+        self._update_biomass_age(species_list, densities)
 
-        # Phase 7: Speciation (check every 10 ticks, starting at tick 10).
-        if tick_num > 0 and tick_num % 10 == 0:
+        # Enforce carrying capacity
+        self._enforce_carrying_capacity(densities)
+
+        # Write all state
+        self._write_species_state(species_list, densities, seed_banks, tick_num)
+
+        # Promote individuals every 4 ticks (annually)
+        if tick_num % 4 == 0:
+            self._promote_individuals(tick_num)
+
+        # Speciation check every 200 ticks (50 years)
+        if tick_num > 0 and tick_num % 200 == 0:
             self._check_speciation(tick_num)
 
         clock.tick_number += 1
@@ -275,17 +316,81 @@ class EcologyTier:
         for idx, (name, template) in enumerate(_ANCESTOR_TEMPLATES):
             genome = {}
             for key, val in template.items():
-                perturb = rng.uniform(-0.05, 0.05)
-                genome[key] = float(np.clip(val + perturb, 0.0, None))
-                # Keep tolerances in [0, 1]
-                if key in (
-                    "drought_tolerance",
-                    "frost_tolerance",
-                    "shade_tolerance",
-                    "growth_rate",
-                    "seed_mass",
-                ):
-                    genome[key] = float(np.clip(genome[key], 0.0, 1.0))
+                if key == "mast_interval":
+                    # Integer trait: perturb by rounding after uniform offset.
+                    genome["mast_interval"] = int(
+                        np.clip(round(val + rng.uniform(-0.5, 0.5)), 1, 7)
+                    )
+                else:
+                    perturb = rng.uniform(-0.05, 0.05)
+                    genome[key] = float(np.clip(val + perturb, 0.0, None))
+                    # Keep bounded functional traits in [0, 1]
+                    if key in (
+                        "drought_tolerance",
+                        "frost_tolerance",
+                        "shade_tolerance",
+                        "growth_rate",
+                        "seed_mass",
+                        "phenological_aggressiveness",
+                        "evergreenness",
+                    ):
+                        genome[key] = float(np.clip(genome[key], 0.0, 1.0))
+
+            # ── Morphological trait derivation (soft coupling + random offset) ──
+
+            # growth_form: enum 0-4 (tree=0, shrub=1, herb=2, grass=3, cushion=4)
+            if genome["max_height"] > 10:
+                base_form = 0  # tree
+            elif genome["max_height"] > 1.5:
+                base_form = 1  # shrub
+            elif genome["lifespan"] > 20:
+                base_form = 2  # herb
+            elif genome["growth_rate"] > 0.5:
+                base_form = 3  # grass
+            else:
+                base_form = 4  # cushion
+            genome["growth_form"] = base_form
+
+            # leaf_size: [0, 1], coupled to shade_tolerance (+) and drought_tolerance (-)
+            genome["leaf_size"] = float(np.clip(
+                genome["shade_tolerance"] * 0.6
+                - genome["drought_tolerance"] * 0.4
+                + 0.4
+                + rng.normal(0, 0.1),
+                0.0, 1.0,
+            ))
+
+            # leaf_shape: [0, 1] (0=needle, 1=broad), coupled to evergreenness
+            genome["leaf_shape"] = float(np.clip(
+                1.0 - genome["evergreenness"] * 0.7 + rng.normal(0, 0.1),
+                0.0, 1.0,
+            ))
+
+            # flower_color: [0, 1] (hue wheel), fully independent
+            genome["flower_color"] = float(rng.uniform(0, 1))
+
+            # flower_size: [0, 1], inversely correlated with seed_mass and evergreenness
+            genome["flower_size"] = float(np.clip(
+                0.6
+                - genome["seed_mass"] * 0.3
+                - genome["evergreenness"] * 0.3
+                + rng.normal(0, 0.1),
+                0.0, 1.0,
+            ))
+
+            # bark_texture: [0, 1] (smooth to rough), correlated with lifespan
+            genome["bark_texture"] = float(np.clip(
+                min(genome["lifespan"] / 300.0, 1.0) + rng.normal(0, 0.1),
+                0.0, 1.0,
+            ))
+
+            # stem_woodiness: [0, 1] (herbaceous to woody)
+            genome["stem_woodiness"] = float(np.clip(
+                min(genome["lifespan"] / 200.0, 1.0) * 0.6
+                + (1.0 - genome["growth_rate"]) * 0.4
+                + rng.normal(0, 0.1),
+                0.0, 1.0,
+            ))
 
             self._world.events.add_species(
                 species_id=f"anc_{idx:02d}_{name}",
@@ -296,15 +401,14 @@ class EcologyTier:
 
     # ── initial populations ────────────────────────────────────────
 
-    def _seed_initial_populations(self, tick_number: int) -> None:
+    def _seed_initial_populations(self, tick_number: int, weather: SeasonalWeather) -> None:
         rng = create_rng(self._world.seed, "ecology", "init_pop", tick_number)
         store = self._world.rasters
-        climate_cache = self._load_climate_cache()
 
         for sp in self._world.events.list_species():
             sid = sp["species_id"]
             genome = self._world.events.get_species(sid)["genome"]
-            suit = self._compute_suitability(genome, climate_cache)
+            suit = self._compute_suitability_from_weather(genome, weather)
             # Place low density in areas with good suitability.
             initial = np.where(
                 suit > 0.3,
@@ -318,50 +422,445 @@ class EcologyTier:
                 tick_number,
             )
 
-    # ── suitability ────────────────────────────────────────────────
+    # ── suitability from weather ──────────────────────────────────
 
-    def _compute_suitability(
+    def _compute_suitability_from_weather(
         self,
         genome: dict,
-        climate_cache: dict[str, NDArray[np.float64]],
+        weather: SeasonalWeather,
+        canopy_shade: NDArray[np.float64] | None = None,
     ) -> NDArray[np.float64]:
-        """Product of Gaussian match factors — Liebig's law of the minimum."""
-        suit = np.ones((self.GRID_SIZE, self.GRID_SIZE), dtype=np.float64)
+        """Suitability from current seasonal weather conditions."""
+        n = self.GRID_SIZE
+        suit = np.ones((n, n), dtype=np.float64)
 
-        # Drought: high drought_tolerance → thrives where moisture is low.
-        drought_stress = 1.0 - climate_cache["soil_moisture_summer"]
+        # Moisture suitability (derive soil moisture from precipitation + terrain)
+        # Normalize precipitation to [0, 1] range
+        precip_norm = np.clip(weather.precipitation / 2000.0, 0, 1)
+        drought_stress = 1.0 - precip_norm
         suit *= _gaussian_match(drought_stress, genome["drought_tolerance"], sigma=0.3)
 
-        # Frost severity.
-        frost_severity = climate_cache["frost_days"] / 365.0
-        suit *= _gaussian_match(frost_severity, genome["frost_tolerance"], sigma=0.3)
-
-        # GDD / warmth: frost-tolerant species don't need warmth.
-        gdd = climate_cache["growing_degree_days"]
-        gdd_norm = gdd / (gdd.max() + 1e-10)
+        # Temperature suitability
+        # Normalize temperature to a preference scale
+        temp_norm = np.clip((weather.temperature - (-10)) / 30.0, 0, 1)  # -10C to 20C range
         warmth_preference = 1.0 - genome["frost_tolerance"]
-        suit *= _gaussian_match(gdd_norm, warmth_preference, sigma=0.4)
+        suit *= _gaussian_match(temp_norm, warmth_preference, sigma=0.4)
 
-        # Light / shade tolerance.
-        light_need = 1.0 - genome["shade_tolerance"]
-        insolation = climate_cache["solar_insolation"]
-        insol_norm = insolation / (insolation.max() + 1e-10)
-        suit *= _gaussian_match(insol_norm, 1.0 - light_need * 0.5, sigma=0.4)
+        # Light competition via canopy shading (max_height becomes load-bearing)
+        if canopy_shade is not None:
+            # shade_tolerance determines ability to grow under canopy
+            light_available = 1.0 - canopy_shade
+            light_need = 1.0 - genome["shade_tolerance"]
+            # Species that need light are penalized by shade
+            suit *= _gaussian_match(light_available, 1.0 - light_need * 0.5, sigma=0.4)
 
         return suit
 
-    # ── population dynamics ────────────────────────────────────────
+    # ── canopy shade ──────────────────────────────────────────────
 
-    def _update_populations(self, tick_number: int) -> None:
-        rng = create_rng(self._world.seed, "ecology", "dynamics", tick_number)
-        store = self._world.rasters
-        climate_cache = self._load_climate_cache()
+    def _compute_canopy_shade(
+        self,
+        species_list: list,
+        densities: dict,
+    ) -> NDArray[np.float64]:
+        """Compute canopy shade from species heights and densities."""
+        n = self.GRID_SIZE
+        shade = np.zeros((n, n), dtype=np.float64)
+        for sp in species_list:
+            sid = sp["species_id"]
+            genome = self._world.events.get_species(sid)["genome"]
+            # Shade cast is proportional to density * relative height
+            height_factor = min(genome["max_height"] / 30.0, 1.0)  # normalize to ~30m max
+            shade += densities[sid] * height_factor * 0.1  # 0.1 = shade per unit density
+        return np.clip(shade, 0.0, 1.0)
 
-        species_list = self._world.events.list_species()
+    # ── season-specific methods ───────────────────────────────────
+
+    def _winter_mortality(self, weather: SeasonalWeather, species_list: list, densities: dict) -> None:
+        """Winter kill: species with low frost tolerance die in cold conditions."""
+        for sp in species_list:
+            sid = sp["species_id"]
+            genome = self._world.events.get_species(sid)["genome"]
+            cold_hardiness = genome["frost_tolerance"] * 0.8 + genome["evergreenness"] * 0.2
+            # Mortality where frost exceeds hardiness
+            excess_frost = np.clip(weather.frost_severity - cold_hardiness, 0, None)
+            kill_fraction = excess_frost * 0.15  # 15% of excess frost kills
+            densities[sid] *= (1.0 - kill_fraction)
+            densities[sid] = np.clip(densities[sid], 0.0, None)
+
+    def _spring_leafout_and_frost(self, weather: SeasonalWeather, species_list: list, densities: dict) -> None:
+        """Early leafers risk late frost damage."""
+        for sp in species_list:
+            sid = sp["species_id"]
+            genome = self._world.events.get_species(sid)["genome"]
+            aggressiveness = genome["phenological_aggressiveness"]
+            # Only aggressive species leaf out in spring
+            if aggressiveness < 0.3:
+                continue
+            # Frost damage = frost_severity * aggressiveness * (1 - frost_tolerance)
+            damage = weather.frost_severity * aggressiveness * (1.0 - genome["frost_tolerance"])
+            kill_fraction = np.clip(damage * 0.2, 0, 0.5)  # cap at 50% loss
+            densities[sid] *= (1.0 - kill_fraction)
+            densities[sid] = np.clip(densities[sid], 0.0, None)
+
+    def _spring_establishment(
+        self,
+        weather: SeasonalWeather,
+        species_list: list,
+        densities: dict,
+        seed_banks: dict,
+    ) -> None:
+        """Recruitment from seed bank, weighted by suitability. Early leafers get bonus."""
+        n = self.GRID_SIZE
+        carrying_capacity = 15.0
+        total = sum(densities.values())
+        if isinstance(total, int):
+            total = np.zeros((n, n), dtype=np.float64)
+        available = np.clip(carrying_capacity - total, 0, None)
+
+        canopy = self._compute_canopy_shade(species_list, densities)
+
+        for sp in species_list:
+            sid = sp["species_id"]
+            genome = self._world.events.get_species(sid)["genome"]
+            sb = seed_banks.get(sid, np.zeros((n, n), dtype=np.float64))
+            suit = self._compute_suitability_from_weather(genome, weather, canopy)
+
+            # Early leafers get establishment bonus in spring
+            aggressiveness_bonus = 1.0 + genome["phenological_aggressiveness"] * 0.5
+            establishment = sb * 0.05 * suit * (available / carrying_capacity) * aggressiveness_bonus
+            densities[sid] = densities[sid] + establishment
+            densities[sid] = np.clip(densities[sid], 0.0, None)
+
+            # Recompute available
+            total = np.zeros((n, n), dtype=np.float64)
+            for d in densities.values():
+                total += d
+            available = np.clip(carrying_capacity - total, 0, None)
+
+    def _summer_growth_and_competition(
+        self,
+        weather: SeasonalWeather,
+        species_list: list,
+        densities: dict,
+        tick_num: int,
+    ) -> None:
+        """Main growth season. Height-based light competition."""
+        rng = create_rng(self._world.seed, "ecology", "summer_growth", tick_num)
         n = self.GRID_SIZE
         carrying_capacity = 15.0
 
-        # Load or initialise densities and seed banks.
+        # Compute canopy shade
+        canopy = self._compute_canopy_shade(species_list, densities)
+
+        total = np.zeros((n, n), dtype=np.float64)
+        for d in densities.values():
+            total += d
+        available = np.clip(carrying_capacity - total, 0, None)
+
+        # Load biomass age for establishment advantage
+        biomass_ages = self._load_biomass_age()
+
+        for sp in species_list:
+            sid = sp["species_id"]
+            genome = self._world.events.get_species(sid)["genome"]
+            density = densities[sid]
+            suit = self._compute_suitability_from_weather(genome, weather, canopy)
+
+            # Growth scaled by growth_rate, suitability, and available capacity
+            # Established populations (high biomass_age) grow more efficiently
+            age_bonus = 1.0
+            if sid in biomass_ages:
+                age_bonus = 1.0 + np.clip(biomass_ages[sid] / 100.0, 0, 0.5)
+
+            growth = density * genome["growth_rate"] * suit * 0.15 * (available / carrying_capacity) * age_bonus
+
+            # Base mortality (1/lifespan scaled for seasonal tick)
+            base_mortality_rate = 0.25 / max(genome["lifespan"], 1.0)
+            stress_mortality = 0.02 * (1.0 - suit)
+            mortality = density * (base_mortality_rate + stress_mortality)
+
+            density = density + growth - mortality
+            density = np.clip(density, 0.0, None)
+
+            # Zero out negligible
+            density = np.where((density < 0.01) & (suit < 0.2), 0.0, density)
+            densities[sid] = density
+
+            # Recompute available
+            total = np.zeros((n, n), dtype=np.float64)
+            for d in densities.values():
+                total += d
+            available = np.clip(carrying_capacity - total, 0, None)
+
+    def _summer_drought_mortality(self, weather: SeasonalWeather, species_list: list, densities: dict) -> None:
+        """Drought stress kills species with low drought tolerance."""
+        # Load cumulative drought stress
+        drought_stress = self._load_drought_stress()
+
+        for sp in species_list:
+            sid = sp["species_id"]
+            genome = self._world.events.get_species(sid)["genome"]
+            # Mortality scales with cumulative drought and inversely with tolerance
+            vulnerability = 1.0 - genome["drought_tolerance"]
+            kill_fraction = np.clip(drought_stress * vulnerability * 0.05, 0, 0.3)
+            densities[sid] *= (1.0 - kill_fraction)
+            densities[sid] = np.clip(densities[sid], 0.0, None)
+
+    def _fire_disturbance(
+        self,
+        weather: SeasonalWeather,
+        species_list: list,
+        densities: dict,
+        tick_num: int,
+    ) -> None:
+        """Fire in summer, driven by dryness and storm intensity."""
+        rng = create_rng(self._world.seed, "ecology", "fire", tick_num)
+        current_year = self._world.tier_clocks[TIER].simulated_year
+
+        # Skip on first tick
+        if tick_num == 0:
+            return
+
+        # Derive moisture from precipitation
+        moisture = np.clip(weather.precipitation / 2000.0, 0, 1)
+
+        # Fire probability scales with dryness and storm intensity
+        # Fewer fires per seasonal tick than per 5-year tick
+        fire_rate = 0.3 + weather.storm_intensity * 0.2  # base + storm bonus
+        n_fires = int(rng.poisson(fire_rate))
+
+        for _ in range(n_fires):
+            dryness = 1.0 - moisture
+            dryness_flat = dryness.ravel()
+            total = dryness_flat.sum()
+            if total <= 0:
+                continue
+            probs = dryness_flat / total
+            ignition_idx = int(rng.choice(len(probs), p=probs))
+            ig_row, ig_col = divmod(ignition_idx, self.GRID_SIZE)
+
+            burned = self._spread_fire(ig_row, ig_col, moisture, rng)
+
+            if burned.sum() > 0:
+                x = float(ig_col * self.CELL_SIZE + self.CELL_SIZE / 2)
+                y = float(ig_row * self.CELL_SIZE + self.CELL_SIZE / 2)
+                radius = float(np.sqrt(burned.sum()) * self.CELL_SIZE / 2)
+                self._world.events.add_event(
+                    "fire", x, y, current_year,
+                    radius=radius,
+                    data={"cells_burned": int(burned.sum()), "tick": tick_num},
+                )
+
+                for sp in species_list:
+                    sid = sp["species_id"]
+                    kill_fraction = float(rng.uniform(0.7, 0.95))
+                    densities[sid] = np.where(burned, densities[sid] * (1 - kill_fraction), densities[sid])
+
+    def _seed_production_and_dispersal(
+        self,
+        weather: SeasonalWeather,
+        species_list: list,
+        densities: dict,
+        seed_banks: dict,
+        tick_num: int,
+    ) -> None:
+        """Fall: produce seeds, disperse, update seed bank."""
+        rng = create_rng(self._world.seed, "ecology", "dispersal", tick_num)
+        n = self.GRID_SIZE
+        current_year = self._world.tier_clocks[TIER].simulated_year
+
+        for sp in species_list:
+            sid = sp["species_id"]
+            genome = self._world.events.get_species(sid)["genome"]
+            density = densities[sid]
+
+            # Mast seeding: full production only in mast years
+            mast_interval = int(genome.get("mast_interval", 1))
+            year = int(current_year)
+            # Species-specific phase offset from genome (use hash of sid)
+            phase = hash(sid) % max(mast_interval, 1)
+            if mast_interval > 1 and (year % mast_interval) != phase:
+                seed_multiplier = 0.1  # 10% in non-mast years
+            else:
+                seed_multiplier = 1.0
+
+            seed_production = density * genome["growth_rate"] * 0.3 * seed_multiplier
+
+            # Dispersal
+            dispersal_radius = 1 + int(2 * (1.0 - genome["seed_mass"]))
+            seed_input = _disperse(seed_production, dispersal_radius)
+
+            # Rare long-distance dispersal
+            if rng.random() < 0.05:  # lower rate per seasonal tick
+                ldd_count = int(rng.integers(1, 4))
+                for _ in range(ldd_count):
+                    r = int(rng.integers(0, n))
+                    c = int(rng.integers(0, n))
+                    seed_input[r, c] += rng.uniform(0.1, 0.5)
+
+            # Seed bank: decay + input
+            half_life = 5.0 + genome["seed_mass"] * 195.0
+            decay = 0.5 ** (0.25 / half_life)  # seasonal decay
+            sb = seed_banks.get(sid, np.zeros((n, n), dtype=np.float64))
+            seed_banks[sid] = np.clip(sb * decay + seed_input * 0.3, 0.0, None)
+
+    def _senescence_and_fuel(self, weather: SeasonalWeather, species_list: list, densities: dict) -> None:
+        """Deciduous species drop leaves. Fuel accumulates for next summer's fire."""
+        # Fuel load is implicit via density — higher density = more fuel for fire spread
+        # Deciduous species (low evergreenness) lose some density in fall as leaf drop
+        # This is a minor effect — mainly narrative/future use
+        pass  # Fuel is computed from density at fire time; no explicit fuel layer yet
+
+    def _blowdown_disturbance(
+        self,
+        weather: SeasonalWeather,
+        species_list: list,
+        densities: dict,
+        tick_num: int,
+    ) -> None:
+        """Storm-driven windthrow in fall."""
+        rng = create_rng(self._world.seed, "ecology", "blowdown", tick_num)
+        current_year = self._world.tier_clocks[TIER].simulated_year
+
+        if tick_num == 0:
+            return
+
+        # Blowdown probability scales with storm intensity
+        blowdown_rate = 0.05 + weather.storm_intensity * 0.15
+        n_blowdown = int(rng.poisson(blowdown_rate))
+
+        # Need heightmap for exposure
+        store = self._world.rasters
+        try:
+            eroded_hm = store.read_layer("climate_hydrology", "eroded_heightmap")
+        except Exception:
+            return  # No heightmap available
+
+        for _ in range(n_blowdown):
+            elev_norm = eroded_hm / (eroded_hm.max() + 1e-10)
+            exposure = elev_norm.ravel()
+            total = exposure.sum()
+            if total <= 0:
+                continue
+            probs = exposure / total
+            idx = int(rng.choice(len(probs), p=probs))
+            bd_row, bd_col = divmod(idx, self.GRID_SIZE)
+
+            patch_radius = int(rng.integers(3, 10))  # smaller patches for seasonal
+            y_coords, x_coords = np.ogrid[: self.GRID_SIZE, : self.GRID_SIZE]
+            dist = np.sqrt((y_coords - bd_row) ** 2 + (x_coords - bd_col) ** 2).astype(np.float64)
+            affected = dist <= patch_radius
+
+            if affected.sum() > 0:
+                x = float(bd_col * self.CELL_SIZE + self.CELL_SIZE / 2)
+                y = float(bd_row * self.CELL_SIZE + self.CELL_SIZE / 2)
+                self._world.events.add_event(
+                    "blowdown", x, y, current_year,
+                    radius=float(patch_radius * self.CELL_SIZE),
+                    data={"cells_affected": int(affected.sum()), "tick": tick_num},
+                )
+                for sp in species_list:
+                    sid = sp["species_id"]
+                    kill_fraction = float(rng.uniform(0.4, 0.8))
+                    densities[sid] = np.where(affected, densities[sid] * (1 - kill_fraction), densities[sid])
+
+    # ── fire spread ──────────────────────────────────────────────
+
+    def _spread_fire(
+        self,
+        start_row: int,
+        start_col: int,
+        moisture: NDArray[np.float64],
+        rng: np.random.Generator,
+    ) -> NDArray[np.bool_]:
+        """Spread fire from ignition point. Returns boolean burned mask."""
+        n = self.GRID_SIZE
+        burned = np.zeros((n, n), dtype=bool)
+        burned[start_row, start_col] = True
+        active = [(start_row, start_col)]
+
+        max_cells = int(rng.integers(20, 200))
+
+        while active and burned.sum() < max_cells:
+            new_active: list[tuple[int, int]] = []
+            for r, c in active:
+                for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < n and 0 <= nc < n and not burned[nr, nc]:
+                        spread_prob = 0.4 * (1.0 - moisture[nr, nc])
+                        if rng.random() < spread_prob:
+                            burned[nr, nc] = True
+                            new_active.append((nr, nc))
+            active = new_active
+
+        return burned
+
+    # ── cumulative drought stress ─────────────────────────────────
+
+    def _load_drought_stress(self) -> NDArray[np.float64]:
+        store = self._world.rasters
+        try:
+            if "drought_stress" in store.list_layers(TIER):
+                return store.read_layer(TIER, "drought_stress").copy()
+        except Exception:
+            pass
+        return np.zeros((self.GRID_SIZE, self.GRID_SIZE), dtype=np.float64)
+
+    def _update_cumulative_drought(self, weather: SeasonalWeather) -> None:
+        drought = self._load_drought_stress()
+        if weather.season == 2:  # Summer
+            # Normal precip is ~560mm for summer (800 * 0.7)
+            normal_precip = 560.0
+            deficit = np.clip(normal_precip - weather.precipitation, 0, None) / normal_precip
+            drought = drought * 0.7 + deficit * 0.3
+        else:
+            drought *= 0.9  # slow recovery
+        drought = np.clip(drought, 0.0, 1.0)
+        self._world.rasters.write_layer(
+            TIER, "drought_stress", drought.astype(np.float64),
+            self._world.tier_clocks[TIER].tick_number,
+        )
+
+    # ── biomass age tracking ──────────────────────────────────────
+
+    def _load_biomass_age(self) -> dict[str, NDArray[np.float64]]:
+        store = self._world.rasters
+        ages: dict[str, NDArray[np.float64]] = {}
+        ecology_layers = store.list_layers(TIER)
+        for sp in self._world.events.list_species():
+            sid = sp["species_id"]
+            layer = f"biomass_age_{sid}"
+            if layer in ecology_layers:
+                ages[sid] = store.read_layer(TIER, layer).copy()
+        return ages
+
+    def _update_biomass_age(self, species_list: list, densities: dict) -> None:
+        store = self._world.rasters
+        tick_num = self._world.tier_clocks[TIER].tick_number
+        ecology_layers = store.list_layers(TIER)
+
+        for sp in species_list:
+            sid = sp["species_id"]
+            layer = f"biomass_age_{sid}"
+            if layer in ecology_layers:
+                age = store.read_layer(TIER, layer).copy()
+            else:
+                age = np.zeros((self.GRID_SIZE, self.GRID_SIZE), dtype=np.float64)
+
+            # Accumulate with density, decay where density is low
+            age += densities[sid] * 0.25  # 0.25 years per tick
+            age = np.where(densities[sid] < 0.01, age * 0.9, age)  # decay where absent
+
+            store.write_layer(TIER, layer, age.astype(np.float64), tick_num)
+
+    # ── state loading / writing ───────────────────────────────────
+
+    def _load_species_state(
+        self, species_list: list,
+    ) -> tuple[dict[str, NDArray[np.float64]], dict[str, NDArray[np.float64]]]:
+        store = self._world.rasters
+        n = self.GRID_SIZE
         ecology_layers = store.list_layers(TIER)
         densities: dict[str, NDArray[np.float64]] = {}
         seed_banks: dict[str, NDArray[np.float64]] = {}
@@ -380,97 +879,49 @@ class EcologyTier:
             else:
                 seed_banks[sid] = np.zeros((n, n), dtype=np.float64)
 
-        # Total density and available capacity.
-        total_density = np.zeros((n, n), dtype=np.float64)
-        for d in densities.values():
-            total_density += d
-        available = np.clip(carrying_capacity - total_density, 0.0, None)
+        return densities, seed_banks
 
-        for sp in species_list:
-            sid = sp["species_id"]
-            genome = self._world.events.get_species(sid)["genome"]
-            density = densities[sid]
-            sb = seed_banks[sid]
-
-            suit = self._compute_suitability(genome, climate_cache)
-
-            # Dispersal — light seeds spread further.
-            dispersal_radius = 1 + int(2 * (1.0 - genome["seed_mass"]))
-            seed_production = density * genome["growth_rate"] * 0.5
-            seed_input = _disperse(seed_production, dispersal_radius)
-
-            # Rare long-distance dispersal (designed stochasticity).
-            if rng.random() < 0.1:
-                ldd_count = int(rng.integers(1, 5))
-                for _ in range(ldd_count):
-                    r = int(rng.integers(0, n))
-                    c = int(rng.integers(0, n))
-                    seed_input[r, c] += rng.uniform(0.1, 1.0)
-
-            # Seed bank: decay + input.
-            half_life = 5.0 + genome["seed_mass"] * 195.0
-            decay = 0.5 ** (self.YEARS_PER_TICK / half_life)
-            sb = sb * decay + seed_input * 0.3
-
-            # Establishment from seeds.
-            establishment = (seed_input + sb * 0.1) * suit * (available / carrying_capacity)
-
-            # Growth of existing populations.
-            growth = density * genome["growth_rate"] * suit * 0.1 * (available / carrying_capacity)
-
-            # Mortality.
-            base_mortality = 0.02 * (1.0 / max(genome["lifespan"], 1.0) * 100.0)
-            stress_mortality = 0.1 * (1.0 - suit)
-            mortality = density * (base_mortality + stress_mortality)
-
-            # Update density.
-            density = density + establishment + growth - mortality
-            density = np.clip(density, 0.0, None)
-
-            # Tiny stochastic noise where populations exist.
-            noise = rng.uniform(0.0, 0.001, density.shape)
-            density += np.where(density > 0.0, noise, 0.0)
-
-            # Zero out negligible densities in unsuitable habitat so that
-            # species are genuinely absent from parts of the map.
-            density = np.where((density < 0.01) & (suit < 0.2), 0.0, density)
-            density = np.clip(density, 0.0, None)
-
-            densities[sid] = density
-            seed_banks[sid] = np.clip(sb, 0.0, None)
-
-            # Recompute available capacity for next species.
-            total_density = np.zeros((n, n), dtype=np.float64)
-            for d in densities.values():
-                total_density += d
-            available = np.clip(carrying_capacity - total_density, 0.0, None)
-
-        # Write results.
+    def _write_species_state(
+        self,
+        species_list: list,
+        densities: dict,
+        seed_banks: dict,
+        tick_num: int,
+    ) -> None:
+        store = self._world.rasters
+        n = self.GRID_SIZE
         seed_bank_total = np.zeros((n, n), dtype=np.float64)
+
         for sp in species_list:
             sid = sp["species_id"]
             store.write_layer(
-                TIER,
-                f"species_{sid}_density",
-                densities[sid].astype(np.float64),
-                tick_number,
+                TIER, f"species_{sid}_density",
+                densities[sid].astype(np.float64), tick_num,
             )
+            sb = seed_banks.get(sid, np.zeros((n, n), dtype=np.float64))
             store.write_layer(
-                TIER,
-                f"seed_bank_{sid}",
-                seed_banks[sid].astype(np.float64),
-                tick_number,
+                TIER, f"seed_bank_{sid}", sb.astype(np.float64), tick_num,
             )
-            seed_bank_total += seed_banks[sid]
+            seed_bank_total += sb
 
-        store.write_layer(
-            TIER,
-            "seed_bank_total",
-            seed_bank_total.astype(np.float64),
-            tick_number,
-        )
+        store.write_layer(TIER, "seed_bank_total", seed_bank_total.astype(np.float64), tick_num)
 
-    # ── Phase 7: distinguished individuals ──────────────────────────
+    def _enforce_carrying_capacity(self, densities: dict) -> None:
+        """Ensure total density per cell doesn't exceed carrying capacity."""
+        n = self.GRID_SIZE
+        carrying_capacity = 15.0
+        total = np.zeros((n, n), dtype=np.float64)
+        for d in densities.values():
+            total += d
+
+        excess_mask = total > carrying_capacity
+        if excess_mask.any():
+            scale = np.where(excess_mask, carrying_capacity / (total + 1e-10), 1.0)
+            for sid in densities:
+                densities[sid] *= scale
+                densities[sid] = np.clip(densities[sid], 0.0, None)
+
+    # ── distinguished individuals ─────────────────────────────────
 
     def _promote_individuals(self, tick_number: int) -> None:
         """Scan density fields and promote prominent plants to named individuals."""
@@ -513,125 +964,7 @@ class EcologyTier:
                 ind_id = f"ind_{sid}_{tick_number}_{row}_{col}"
                 self._world.events.add_individual(ind_id, sid, x, y, appeared_year=current_year)
 
-    # ── Phase 7: disturbance ──────────────────────────────────────
-
-    def _run_disturbance(self, tick_number: int) -> None:
-        """Run stochastic disturbance events: fire and blowdown."""
-        rng = create_rng(self._world.seed, "ecology", "disturbance", tick_number)
-        store = self._world.rasters
-        current_year = self._world.tier_clocks[TIER].simulated_year
-
-        # Read climate data for fire probability.
-        moisture = store.read_layer("climate_hydrology", "soil_moisture_summer")
-        eroded_hm = store.read_layer("climate_hydrology", "eroded_heightmap")
-
-        # === Fire ===
-        n_fires = int(rng.poisson(1.5))
-        for _ in range(n_fires):
-            dryness = 1.0 - moisture
-            dryness_flat = dryness.ravel()
-            total = dryness_flat.sum()
-            if total <= 0:
-                continue
-            probs = dryness_flat / total
-            ignition_idx = int(rng.choice(len(probs), p=probs))
-            ig_row, ig_col = divmod(ignition_idx, self.GRID_SIZE)
-
-            burned = self._spread_fire(ig_row, ig_col, moisture, rng)
-
-            if burned.sum() > 0:
-                x = float(ig_col * self.CELL_SIZE + self.CELL_SIZE / 2)
-                y = float(ig_row * self.CELL_SIZE + self.CELL_SIZE / 2)
-                radius = float(np.sqrt(burned.sum()) * self.CELL_SIZE / 2)
-                self._world.events.add_event(
-                    "fire",
-                    x,
-                    y,
-                    current_year,
-                    radius=radius,
-                    data={"cells_burned": int(burned.sum()), "tick": tick_number},
-                )
-
-                # Kill density in burned cells.
-                for sp in self._world.events.list_species():
-                    sid = sp["species_id"]
-                    layer_name = f"species_{sid}_density"
-                    if layer_name not in store.list_layers(TIER):
-                        continue
-                    density = store.read_layer(TIER, layer_name)
-                    kill_fraction = float(rng.uniform(0.7, 0.95))
-                    density = np.where(burned, density * (1 - kill_fraction), density)
-                    store.write_layer(TIER, layer_name, density.astype(np.float64), tick_number)
-
-        # === Blowdown ===
-        n_blowdown = int(rng.poisson(0.3))
-        for _ in range(n_blowdown):
-            elev_norm = eroded_hm / (eroded_hm.max() + 1e-10)
-            exposure = elev_norm.ravel()
-            total = exposure.sum()
-            if total <= 0:
-                continue
-            probs = exposure / total
-            idx = int(rng.choice(len(probs), p=probs))
-            bd_row, bd_col = divmod(idx, self.GRID_SIZE)
-
-            patch_radius = int(rng.integers(5, 15))
-            y_coords, x_coords = np.ogrid[: self.GRID_SIZE, : self.GRID_SIZE]
-            dist = np.sqrt((y_coords - bd_row) ** 2 + (x_coords - bd_col) ** 2).astype(np.float64)
-            affected = dist <= patch_radius
-
-            if affected.sum() > 0:
-                x = float(bd_col * self.CELL_SIZE + self.CELL_SIZE / 2)
-                y = float(bd_row * self.CELL_SIZE + self.CELL_SIZE / 2)
-                self._world.events.add_event(
-                    "blowdown",
-                    x,
-                    y,
-                    current_year,
-                    radius=float(patch_radius * self.CELL_SIZE),
-                    data={"cells_affected": int(affected.sum()), "tick": tick_number},
-                )
-
-                for sp in self._world.events.list_species():
-                    sid = sp["species_id"]
-                    layer_name = f"species_{sid}_density"
-                    if layer_name not in store.list_layers(TIER):
-                        continue
-                    density = store.read_layer(TIER, layer_name)
-                    kill_fraction = float(rng.uniform(0.5, 0.9))
-                    density = np.where(affected, density * (1 - kill_fraction), density)
-                    store.write_layer(TIER, layer_name, density.astype(np.float64), tick_number)
-
-    def _spread_fire(
-        self,
-        start_row: int,
-        start_col: int,
-        moisture: NDArray[np.float64],
-        rng: np.random.Generator,
-    ) -> NDArray[np.bool_]:
-        """Spread fire from ignition point. Returns boolean burned mask."""
-        n = self.GRID_SIZE
-        burned = np.zeros((n, n), dtype=bool)
-        burned[start_row, start_col] = True
-        active = [(start_row, start_col)]
-
-        max_cells = int(rng.integers(20, 200))
-
-        while active and burned.sum() < max_cells:
-            new_active: list[tuple[int, int]] = []
-            for r, c in active:
-                for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                    nr, nc = r + dr, c + dc
-                    if 0 <= nr < n and 0 <= nc < n and not burned[nr, nc]:
-                        spread_prob = 0.4 * (1.0 - moisture[nr, nc])
-                        if rng.random() < spread_prob:
-                            burned[nr, nc] = True
-                            new_active.append((nr, nc))
-            active = new_active
-
-        return burned
-
-    # ── Phase 7: speciation ───────────────────────────────────────
+    # ── speciation ────────────────────────────────────────────────
 
     def _check_speciation(self, tick_number: int) -> None:
         """Check for population fragmentation and potentially create new species."""
@@ -677,10 +1010,28 @@ class EcologyTier:
                     parent_genome = self._world.events.get_species(sid)["genome"]
                     new_genome: dict = {}
                     for key, val in parent_genome.items():
-                        if isinstance(val, float) and val <= 1.0:
+                        if key == "growth_form":
+                            # Discrete: 10% chance of shifting +-1
+                            new_val = int(val)
+                            if rng.random() < 0.1:
+                                new_val += int(rng.choice([-1, 1]))
+                            new_genome[key] = int(np.clip(new_val, 0, 4))
+                        elif key == "mast_interval":
+                            # Integer: +-1 with 20% probability
+                            new_val = int(val)
+                            if rng.random() < 0.2:
+                                new_val += int(rng.choice([-1, 1]))
+                            new_genome[key] = int(np.clip(new_val, 1, 7))
+                        elif key in _MORPHOLOGICAL_TRAITS:
+                            # Higher variance for visual divergence
+                            drift = float(rng.normal(0, 0.15))
+                            new_genome[key] = float(np.clip(val + drift, 0.0, 1.0))
+                        elif key in _BOUNDED_FUNCTIONAL:
+                            # Standard functional drift
                             drift = float(rng.normal(0, 0.08))
                             new_genome[key] = float(np.clip(val + drift, 0.01, 0.99))
                         else:
+                            # Unbounded traits (max_height, lifespan)
                             drift = float(rng.normal(0, 0.1))
                             new_genome[key] = max(0.1, val + val * drift)
 
@@ -708,12 +1059,3 @@ class EcologyTier:
 
             # Update parent density (fragments removed).
             store.write_layer(TIER, layer_name, density.astype(np.float64), tick_number)
-
-    # ── helpers ────────────────────────────────────────────────────
-
-    def _load_climate_cache(self) -> dict[str, NDArray[np.float64]]:
-        store = self._world.rasters
-        cache: dict[str, NDArray[np.float64]] = {}
-        for name in _CLIMATE_LAYERS:
-            cache[name] = store.read_layer("climate_hydrology", name)
-        return cache

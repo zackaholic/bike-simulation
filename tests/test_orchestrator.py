@@ -47,17 +47,17 @@ def test_create_world_produces_heightmap(orch):
     assert "heightmap" in world.rasters.list_layers("geology")
 
 
-def test_advance_50_years(ready_world):
-    """advance(50) should tick ecology 10 times (50/5), no extra climate tick."""
+def test_advance_5_years(ready_world):
+    """advance(5) should tick ecology 20 times (5/0.25), no extra climate tick."""
     world, orch = ready_world
 
-    result = orch.advance(50)
+    result = orch.advance(5)
 
-    assert result["ecology_ticks"] == 10
+    assert result["ecology_ticks"] == 20
     assert result["climate_hydrology_ticks"] == 0
     assert result["geology_ticks"] == 0
-    # Ecology clock should reflect 10 ticks.
-    assert world.tier_clocks["ecology"].tick_number == 10
+    # Ecology clock should reflect 20 ticks.
+    assert world.tier_clocks["ecology"].tick_number == 20
 
 
 def test_advance_triggers_climate_tick(ready_world):
@@ -65,7 +65,7 @@ def test_advance_triggers_climate_tick(ready_world):
     world, orch = ready_world
 
     # Fast-forward ecology clock close to the climate threshold (1000 years)
-    # so we don't need to run 200 slow ecology ticks in the test.
+    # so we don't need to run many slow ecology ticks in the test.
     world.tier_clocks["ecology"].simulated_year = 995.0
     world.tier_clocks["ecology"].tick_number = 199
 
@@ -78,23 +78,23 @@ def test_advance_triggers_climate_tick(ready_world):
 
 
 def test_advance_small_increments(tmp_path):
-    """Five advance(25) calls should produce the same state as one advance(125)."""
+    """Five advance(1) calls should produce the same state as one advance(5)."""
     # World A: incremental advances.
     world_a = World.create(tmp_path / "world_a", seed=42)
     orch_a = Orchestrator(world_a, erosion_params=FAST_PARAMS)
     orch_a.create_world()
     for _ in range(5):
-        orch_a.advance(25)
+        orch_a.advance(1)
 
     # World B: single large advance.
     world_b = World.create(tmp_path / "world_b", seed=42)
     orch_b = Orchestrator(world_b, erosion_params=FAST_PARAMS)
     orch_b.create_world()
-    orch_b.advance(125)
+    orch_b.advance(5)
 
-    # Both should have the same ecology tick count: 125 / 5 = 25.
-    assert world_a.tier_clocks["ecology"].tick_number == 25
-    assert world_b.tier_clocks["ecology"].tick_number == 25
+    # Both should have the same ecology tick count: 5 / 0.25 = 20.
+    assert world_a.tier_clocks["ecology"].tick_number == 20
+    assert world_b.tier_clocks["ecology"].tick_number == 20
     # Same simulated year.
     eco_year_a = world_a.tier_clocks["ecology"].simulated_year
     eco_year_b = world_b.tier_clocks["ecology"].simulated_year
@@ -104,32 +104,32 @@ def test_advance_small_increments(tmp_path):
 def test_advance_returns_summary(ready_world):
     """advance() return dict should contain the four required keys."""
     _world, orch = ready_world
-    result = orch.advance(50)
+    result = orch.advance(5)
 
     assert "years_advanced" in result
     assert "ecology_ticks" in result
     assert "climate_hydrology_ticks" in result
     assert "geology_ticks" in result
-    assert result["years_advanced"] == pytest.approx(50.0)
+    assert result["years_advanced"] == pytest.approx(5.0)
 
 
 def test_advance_ride(ready_world):
-    """advance_ride(30) should advance ~30 years → 6 ecology ticks."""
+    """advance_ride(5) should advance ~5 years → 20 ecology ticks."""
     _world, orch = ready_world
-    result = orch.advance_ride(30)
+    result = orch.advance_ride(5)
 
-    assert result["ecology_ticks"] == 6
-    assert result["years_advanced"] == pytest.approx(30.0)
+    assert result["ecology_ticks"] == 20
+    assert result["years_advanced"] == pytest.approx(5.0)
 
 
 def test_advance_ride_capped(ready_world):
-    """advance_ride(120) should cap at 50 years, not 120."""
+    """advance_ride(120) should cap at 50 years."""
     _world, orch = ready_world
     result = orch.advance_ride(120)
 
     assert result["years_advanced"] == pytest.approx(50.0)
-    # 50 years / 5 years per tick = 10 ecology ticks.
-    assert result["ecology_ticks"] == 10
+    # 50 years / 0.25 years per tick = 200 ecology ticks.
+    assert result["ecology_ticks"] == 200
 
 
 # ── Reproducibility ──────────────────────────────────────────────────
@@ -142,7 +142,7 @@ def test_advance_deterministic(tmp_path):
         world = World.create(tmp_path / name, seed=42)
         orch = Orchestrator(world, erosion_params=FAST_PARAMS)
         orch.create_world()
-        orch.advance(50)
+        orch.advance(5)
         worlds.append(world)
 
     layers_a = worlds[0].rasters.list_layers("ecology")
@@ -156,17 +156,17 @@ def test_advance_deterministic(tmp_path):
 
 
 def test_advance_deterministic_incremental(tmp_path):
-    """advance(25) twice vs advance(50) once should yield the same final state."""
+    """advance(2.5) twice vs advance(5) once should yield the same final state."""
     world_a = World.create(tmp_path / "world_a", seed=42)
     orch_a = Orchestrator(world_a, erosion_params=FAST_PARAMS)
     orch_a.create_world()
-    orch_a.advance(25)
-    orch_a.advance(25)
+    orch_a.advance(2.5)
+    orch_a.advance(2.5)
 
     world_b = World.create(tmp_path / "world_b", seed=42)
     orch_b = Orchestrator(world_b, erosion_params=FAST_PARAMS)
     orch_b.create_world()
-    orch_b.advance(50)
+    orch_b.advance(5)
 
     layers_a = world_a.rasters.list_layers("ecology")
     layers_b = world_b.rasters.list_layers("ecology")
@@ -184,7 +184,7 @@ def test_advance_deterministic_incremental(tmp_path):
 def test_introduce_fire(ready_world):
     """introduce_fire() should record a fire event at the given coordinates."""
     world, orch = ready_world
-    orch.advance(25)
+    orch.advance(5)
     orch.introduce_fire(25000.0, 25000.0)
 
     events = world.events.get_events_in_region(24000, 24000, 26000, 26000)
@@ -197,7 +197,7 @@ def test_introduce_fire(ready_world):
 def test_status_returns_info(ready_world):
     """status() should return a dict with seed, tier clocks, and counts."""
     world, orch = ready_world
-    orch.advance(25)
+    orch.advance(5)
 
     info = orch.status()
 
@@ -218,7 +218,7 @@ def test_world_persists_after_advance(tmp_path):
     world = World.create(path, seed=42)
     orch = Orchestrator(world, erosion_params=FAST_PARAMS)
     orch.create_world()
-    orch.advance(50)
+    orch.advance(5)
 
     expected_eco_year = world.tier_clocks["ecology"].simulated_year
     expected_eco_ticks = world.tier_clocks["ecology"].tick_number
@@ -238,7 +238,7 @@ def test_advance_after_reopen(tmp_path):
     world = World.create(path, seed=42)
     orch = Orchestrator(world, erosion_params=FAST_PARAMS)
     orch.create_world()
-    orch.advance(50)
+    orch.advance(5)
     eco_ticks_before = world.tier_clocks["ecology"].tick_number
 
     world.save(path / "world.json")
@@ -246,8 +246,8 @@ def test_advance_after_reopen(tmp_path):
 
     world2 = World.open(path)
     orch2 = Orchestrator(world2, erosion_params=FAST_PARAMS)
-    result = orch2.advance(50)
+    result = orch2.advance(5)
 
-    assert result["ecology_ticks"] == 10
-    assert world2.tier_clocks["ecology"].tick_number == eco_ticks_before + 10
+    assert result["ecology_ticks"] == 20
+    assert world2.tier_clocks["ecology"].tick_number == eco_ticks_before + 20
     world2.close()

@@ -17,6 +17,7 @@ from bike_sim.tiers.climate_hydrology import ClimateHydrologyTier
 from bike_sim.tiers.ecology import EcologyTier
 from bike_sim.tiers.erosion import ErosionParams
 from bike_sim.tiers.geology import GeologyTier
+from bike_sim.weather import WeatherSystem
 from bike_sim.world import World
 
 
@@ -46,12 +47,11 @@ class Orchestrator:
         self._world.commit_version(trigger="create_world")
 
     def advance(self, years: float) -> dict:
-        """Advance simulation by the given number of years.
+        """Advance simulation by the given number of years using seasonal ticks.
 
-        Tick ordering per the architecture:
-          1. Ecology ticks (multiple, at 5 years each)
-          2. Climate-hydrology ticks (if threshold reached)
-          3. Geology ticks (if threshold reached — very rare)
+        Each tick = 1 season (0.25 years). Weather is generated per-tick from
+        the WeatherSystem. Climate-hydrology and geology tick thresholds are
+        checked but rarely triggered during normal advancement.
 
         Returns a summary dict with tick counts.
         """
@@ -59,8 +59,10 @@ class Orchestrator:
         self._world.rasters.set_version(next_version)
 
         eco = EcologyTier(self._world)
+        heightmap = self._world.rasters.read_layer("geology", "heightmap")
+        weather_sys = WeatherSystem(self._world.seed, heightmap)
 
-        eco_ticks = int(years / EcologyTier.YEARS_PER_TICK)
+        num_seasons = int(years / EcologyTier.YEARS_PER_TICK)
 
         climate_ticks = 0
         geology_ticks = 0
@@ -69,8 +71,13 @@ class Orchestrator:
         climate_clock = self._world.tier_clocks["climate_hydrology"]
         geology_clock = self._world.tier_clocks["geology"]
 
-        for _ in range(eco_ticks):
-            eco.tick()
+        for _ in range(num_seasons):
+            # Generate weather for current time
+            year = eco_clock.simulated_year
+            season = eco_clock.tick_number % 4
+            weather = weather_sys.generate(year, season)
+
+            eco.tick(weather)
 
             # Climate-hydrology should tick once per 1000 ecology-years.
             # The initial tick from create_world() doesn't count — it
@@ -93,7 +100,7 @@ class Orchestrator:
 
         return {
             "years_advanced": years,
-            "ecology_ticks": eco_ticks,
+            "ecology_ticks": num_seasons,
             "climate_hydrology_ticks": climate_ticks,
             "geology_ticks": geology_ticks,
         }
