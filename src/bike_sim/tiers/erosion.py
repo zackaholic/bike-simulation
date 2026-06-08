@@ -484,9 +484,11 @@ def erode_thermal(
 class SeasonalErosionParams:
     """Parameters for lightweight per-season erosion."""
 
-    # Erosion strength: calibrated so 4000 ticks ≈ current batch (11m mean)
-    # 11m / 4000 = 0.00275m per tick mean target
-    erosion_scale: float = 0.003  # m of erosion per unit erosion_potential
+    # Erosion strength: target ~1-2m mean erosion per 1000yr (4000 ticks).
+    # Each tick: erosion_scale * flow_norm * precip_norm * (1+storm*2) * slope * erodibility
+    # With typical values: ~0.3 * 1.0 * 2.0 * 0.05 * 0.8 = 0.024 effective multiplier
+    # So 0.01 * 0.024 ≈ 0.00024m per tick → ~1m per 4000 ticks
+    erosion_scale: float = 0.01  # m of erosion per unit erosion_potential
 
     # Deposition: fraction of eroded material deposited where slope decreases
     deposition_fraction: float = 0.7

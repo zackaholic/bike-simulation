@@ -843,8 +843,12 @@ class EcologyTier:
         drought = self._load_drought_stress()
         if weather.season == 2:  # Summer
             # Normal precip is ~560mm for summer (800 * 0.7)
-            normal_precip = 560.0
-            deficit = np.clip(normal_precip - weather.precipitation, 0, None) / normal_precip
+            # Drought stress accumulates for cells below average precipitation.
+            # The multiplier from weather cycles means some years are globally dry;
+            # spatial variation from terrain creates locally dry cells.
+            normal_precip = weather.precipitation.mean()
+            # Relative deficit: how far below average each cell is (0 if above average)
+            deficit = np.clip(1.0 - weather.precipitation / (normal_precip + 1e-10), 0, None)
             drought = drought * 0.7 + deficit * 0.3
         else:
             drought *= 0.9  # slow recovery

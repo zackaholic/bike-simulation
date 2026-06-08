@@ -203,27 +203,27 @@ class WeatherSystem:
                 )
             )
 
-        # Short cycles
-        _add(3, 7, 0.2, 0.3, "precipitation")
-        _add(4, 8, 0.5, 1.5, "temperature")
+        # Short cycles (year-to-year variability)
+        _add(3, 7, 0.1, 0.2, "precipitation")       # ±10-20% precip
+        _add(4, 8, 0.3, 0.8, "temperature")         # ±0.3-0.8°C
 
-        # Medium cycles
-        _add(25, 50, 0.15, 0.25, "precipitation")
-        _add(30, 70, 1.0, 2.0, "temperature")
+        # Medium cycles (ride-to-ride mood shifts)
+        _add(25, 50, 0.1, 0.15, "precipitation")    # ±10-15% precip
+        _add(30, 70, 0.5, 1.0, "temperature")       # ±0.5-1.0°C
 
         # Compound cycles (1-2)
         n_compound = rng.integers(1, 3)  # 1 or 2
         for _ in range(int(n_compound)):
-            corr = rng.uniform(-1.0, 1.0)
-            _add(15, 40, 0.1, 0.15, "both", correlation=corr)
+            corr = rng.uniform(-0.5, 0.5)
+            _add(15, 40, 0.08, 0.12, "both", correlation=corr)
 
-        # Long cycles
-        _add(200, 500, 0.1, 0.2, "precipitation")
-        _add(300, 800, 2.0, 4.0, "temperature")
+        # Long cycles (month-to-month drift)
+        _add(200, 500, 0.08, 0.15, "precipitation")  # ±8-15% precip
+        _add(300, 800, 1.0, 2.0, "temperature")      # ±1-2°C
 
-        # Very long drift
-        corr = rng.uniform(-1.0, 1.0)
-        _add(50_000, 150_000, 3.0, 6.0, "both", correlation=corr)
+        # Very long drift (deep-time climate)
+        corr = rng.uniform(-0.2, 0.2)
+        _add(50_000, 150_000, 1.5, 3.0, "both", correlation=corr)  # ±1.5-3°C
 
         return cycles
 
@@ -257,6 +257,9 @@ class WeatherSystem:
                 precip_log_anomaly += value * cycle.correlation
 
         precip_multiplier = exp(precip_log_anomaly)  # always positive
+        # Cap to prevent extreme conditions from constructive cycle alignment
+        precip_multiplier = max(0.3, min(precip_multiplier, 2.5))
+        temp_anomaly = max(-5.0, min(temp_anomaly, 5.0))
         return temp_anomaly, precip_multiplier
 
     # ------------------------------------------------------------------
@@ -277,10 +280,12 @@ class WeatherSystem:
         """
         h, w = heightmap.shape
 
-        # Temperature: latitude gradient minus lapse rate
+        # Temperature: latitude gradient minus lapse rate.
+        # Base range 20-10°C (warm temperate latitude) ensures terrain at
+        # ~1000m mean elevation still has warm growing seasons.
         y_coords = np.linspace(0, 1, h).reshape(-1, 1)
-        base_temp = 15.0 - 10.0 * y_coords  # south-to-north gradient
-        lapse_rate = 6.5 / 1000.0  # C per metre
+        base_temp = 20.0 - 10.0 * y_coords  # south-to-north gradient
+        lapse_rate = 5.0 / 1000.0  # C per metre (slightly reduced for variety)
         temperature = base_temp - lapse_rate * heightmap
 
         # Precipitation: orographic + elevation
