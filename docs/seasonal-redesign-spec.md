@@ -643,10 +643,9 @@ Work is structured so each step is independently testable and produces visible r
 
 ### Performance
 
-- Seasonal tick time: target < 0.5s per tick on MacBook Pro
-- 30-season advance (one ride): target < 15s
-- 4000-season advance (1000 years): target < 30 minutes (overnight is fine)
-- World creation (deep history + 1000 years seasonal): target < 2 hours
+- 4000-season advance (1000 years): must complete overnight (~6 hours acceptable)
+- World creation (deep history + 1000 years seasonal): must complete overnight
+- Per-tick speed will improve with optimization; not a blocker yet
 
 ---
 
