@@ -129,7 +129,7 @@ def _cmd_visualize(args: argparse.Namespace) -> None:
     print(f"Opening world at {world_dir}...")
     world = World.open(world_dir)
 
-    tiers = list(world.rasters._root.keys())
+    tiers = world.rasters.list_tiers()
 
     # Colormap choices for known layers.
     layer_cmaps = {

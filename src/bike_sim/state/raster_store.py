@@ -228,6 +228,20 @@ class RasterStore:
 
         return sorted(result)
 
+    def list_tiers(self) -> list[str]:
+        """Return sorted list of tier names that have layers stored."""
+        if not self._layer_history:
+            # Legacy mode: root keys are tier names directly
+            return sorted(
+                k
+                for k in self._root.keys()
+                if not (k.startswith("v") and len(k) == 5 and k[1:].isdigit())
+            )
+        tiers: set[str] = set()
+        for layer_key in self._layer_history:
+            tiers.add(layer_key.split("/")[0])
+        return sorted(tiers)
+
     def list_versions(self) -> list[int]:
         """Return sorted list of version IDs that have been written to."""
         versions: set[int] = set()

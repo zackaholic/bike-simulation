@@ -151,4 +151,36 @@ def create_app(world_dir: str | Path) -> Flask:
         png_bytes = render_tile(query, version, tier, layer, z, x, y, cache_dir)
         return Response(png_bytes, mimetype="image/png")
 
+    # ── Timeline routes ────────────────────────────────────────────
+
+    @app.route("/api/timeline/species")
+    def api_timeline_species():
+        ancestor = request.args.get("ancestor")
+        return jsonify(query.get_species_timeline(ancestor=ancestor))
+
+    @app.route("/api/timeline/weather")
+    def api_timeline_weather():
+        return jsonify(query.get_weather_timeline())
+
+    @app.route("/api/timeline/diversity")
+    def api_timeline_diversity():
+        return jsonify(query.get_diversity_timeline())
+
+    @app.route("/api/timeline/disturbance")
+    def api_timeline_disturbance():
+        return jsonify(query.get_disturbance_timeline())
+
+    @app.route("/api/timeline/snapshots")
+    def api_timeline_snapshots():
+        versions = world.list_versions()
+        snapshots = []
+        for entry in versions:
+            eco_clock = entry.get("tier_clocks", {}).get("ecology", {})
+            year = eco_clock.get("simulated_year", 0.0) if isinstance(eco_clock, dict) else 0.0
+            snapshots.append({
+                "version_id": entry["version_id"],
+                "year": year,
+            })
+        return jsonify(snapshots)
+
     return app

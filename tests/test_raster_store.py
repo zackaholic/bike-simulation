@@ -119,6 +119,46 @@ class TestDtypePreservation:
         np.testing.assert_array_equal(result, data)
 
 
+class TestListTiers:
+    """list_tiers returns correct tier names."""
+
+    def test_empty_store(self, store):
+        assert store.list_tiers() == []
+
+    def test_legacy_flat_store(self, store):
+        """Legacy (unversioned) store derives tiers from root group keys."""
+        store.write_layer("geology", "heightmap", np.zeros((64, 64)), tick_number=0)
+        store.write_layer("ecology", "density", np.zeros((64, 64)), tick_number=0)
+        assert store.list_tiers() == ["ecology", "geology"]
+
+    def test_versioned_store(self, store):
+        """Versioned store derives tiers from _layer_history, not root keys."""
+        store.set_version(1)
+        store.write_layer("geology", "heightmap", np.zeros((64, 64)), tick_number=0)
+        store.write_layer("climate_hydrology", "moisture", np.zeros((64, 64)), tick_number=0)
+        store.set_version(2)
+        store.write_layer("ecology", "density", np.zeros((64, 64)), tick_number=1)
+        result = store.list_tiers()
+        assert result == ["climate_hydrology", "ecology", "geology"]
+
+    def test_versioned_store_excludes_version_groups(self, store):
+        """Version groups like v0001 should not appear as tier names."""
+        store.set_version(1)
+        store.write_layer("geology", "heightmap", np.zeros((64, 64)), tick_number=0)
+        tiers = store.list_tiers()
+        assert "v0001" not in tiers
+        assert tiers == ["geology"]
+
+    def test_legacy_fallback_excludes_version_groups(self, tmp_path):
+        """If _layer_history is empty but root has version-like keys, filter them."""
+        store = RasterStore.create(tmp_path / "rasters.zarr")
+        # Write flat (legacy) layers
+        store.write_layer("geology", "heightmap", np.zeros((64, 64)), tick_number=0)
+        # Manually create a version-like group to simulate edge case
+        store._root.create_group("v0001")
+        assert store.list_tiers() == ["geology"]
+
+
 class TestOpenExisting:
     """RasterStore.open can reopen a previously created store."""
 

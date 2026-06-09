@@ -257,6 +257,118 @@ class EventStore:
         ).fetchall()
         return [self._event_row_to_dict(row) for row in rows]
 
+    # ── Tick summaries ────────────────────────────────────────────────
+
+    def write_tick_summary(
+        self,
+        tick: int,
+        year: float,
+        season: int,
+        species_summaries: list[dict],
+    ) -> None:
+        """Batch-insert per-species summary rows for a single tick.
+
+        Each dict in *species_summaries* must have keys:
+        species_id, total_density, occupied_cells, mean_biomass_age.
+        """
+        rows = [
+            (tick, year, season, s["species_id"], s["total_density"],
+             s["occupied_cells"], s["mean_biomass_age"])
+            for s in species_summaries
+        ]
+        self._conn.executemany(
+            """INSERT OR REPLACE INTO tick_summary
+               (tick, year, season, species_id, total_density, occupied_cells, mean_biomass_age)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
+        self._conn.commit()
+
+    def write_tick_weather(
+        self,
+        tick: int,
+        year: float,
+        season: int,
+        mean_temp: float,
+        mean_precip: float,
+        mean_drought: float,
+    ) -> None:
+        """Insert weather summary for a single tick."""
+        self._conn.execute(
+            """INSERT OR REPLACE INTO tick_weather
+               (tick, year, season, mean_temp, mean_precip, mean_drought)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (tick, year, season, mean_temp, mean_precip, mean_drought),
+        )
+        self._conn.commit()
+
+    def get_tick_summaries(
+        self,
+        species_id: str | None = None,
+        tick_start: int | None = None,
+        tick_end: int | None = None,
+    ) -> list[dict]:
+        """Query tick summaries with optional species and tick-range filters."""
+        clauses: list[str] = []
+        params: list = []
+        if species_id is not None:
+            clauses.append("species_id = ?")
+            params.append(species_id)
+        if tick_start is not None:
+            clauses.append("tick >= ?")
+            params.append(tick_start)
+        if tick_end is not None:
+            clauses.append("tick <= ?")
+            params.append(tick_end)
+
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM tick_summary{where} ORDER BY tick, species_id", params
+        ).fetchall()
+        return [
+            {
+                "tick": row["tick"],
+                "year": row["year"],
+                "season": row["season"],
+                "species_id": row["species_id"],
+                "total_density": row["total_density"],
+                "occupied_cells": row["occupied_cells"],
+                "mean_biomass_age": row["mean_biomass_age"],
+            }
+            for row in rows
+        ]
+
+    def get_tick_weather(
+        self,
+        tick_start: int | None = None,
+        tick_end: int | None = None,
+    ) -> list[dict]:
+        """Query tick weather summaries with optional tick-range filter."""
+        clauses: list[str] = []
+        params: list = []
+        if tick_start is not None:
+            clauses.append("tick >= ?")
+            params.append(tick_start)
+        if tick_end is not None:
+            clauses.append("tick <= ?")
+            params.append(tick_end)
+
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM tick_weather{where} ORDER BY tick", params
+        ).fetchall()
+        return [
+            {
+                "tick": row["tick"],
+                "year": row["year"],
+                "season": row["season"],
+                "mean_temp": row["mean_temp"],
+                "mean_precip": row["mean_precip"],
+                "mean_drought": row["mean_drought"],
+            }
+            for row in rows
+        ]
+
     # ── Internal ─────────────────────────────────────────────────────
 
     def _create_tables(self) -> None:
@@ -297,11 +409,33 @@ class EventStore:
                 ON events (x, y);
             CREATE INDEX IF NOT EXISTS idx_events_year
                 ON events (year);
+
+            CREATE TABLE IF NOT EXISTS tick_summary (
+                tick        INTEGER NOT NULL,
+                year        REAL NOT NULL,
+                season      INTEGER NOT NULL,
+                species_id  TEXT NOT NULL,
+                total_density REAL NOT NULL,
+                occupied_cells INTEGER NOT NULL,
+                mean_biomass_age REAL NOT NULL,
+                PRIMARY KEY (tick, species_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_tick_summary_species
+                ON tick_summary (species_id);
+
+            CREATE TABLE IF NOT EXISTS tick_weather (
+                tick        INTEGER NOT NULL PRIMARY KEY,
+                year        REAL NOT NULL,
+                season      INTEGER NOT NULL,
+                mean_temp   REAL NOT NULL,
+                mean_precip REAL NOT NULL,
+                mean_drought REAL NOT NULL
+            );
         """)
         self._conn.commit()
 
     def _migrate(self) -> None:
-        """Add columns that may be missing from older databases."""
+        """Add columns/tables that may be missing from older databases."""
         for stmt in [
             "ALTER TABLE individuals ADD COLUMN died_year REAL",
             "ALTER TABLE species ADD COLUMN extinct_year REAL",
@@ -311,6 +445,31 @@ class EventStore:
                 self._conn.execute(stmt)
             except sqlite3.OperationalError:
                 pass  # Column already exists
+
+        # Ensure tick_summary and tick_weather tables exist in older databases.
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS tick_summary (
+                tick        INTEGER NOT NULL,
+                year        REAL NOT NULL,
+                season      INTEGER NOT NULL,
+                species_id  TEXT NOT NULL,
+                total_density REAL NOT NULL,
+                occupied_cells INTEGER NOT NULL,
+                mean_biomass_age REAL NOT NULL,
+                PRIMARY KEY (tick, species_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_tick_summary_species
+                ON tick_summary (species_id);
+
+            CREATE TABLE IF NOT EXISTS tick_weather (
+                tick        INTEGER NOT NULL PRIMARY KEY,
+                year        REAL NOT NULL,
+                season      INTEGER NOT NULL,
+                mean_temp   REAL NOT NULL,
+                mean_precip REAL NOT NULL,
+                mean_drought REAL NOT NULL
+            );
+        """)
         self._conn.commit()
 
     @staticmethod

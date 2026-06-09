@@ -6,6 +6,8 @@
 <title>Bike Simulation — World Inspector</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.1.0/dist/chartjs-plugin-annotation.min.js"></script>
 <style>
   html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
   #map { position: absolute; top: 0; left: 0; right: 0; bottom: 0; }
@@ -18,12 +20,58 @@
   }
   #toolbar label { font-weight: 600; color: #333; }
   #toolbar select { font-size: 12px; }
-  .species-dropdown {
+  /* ── Layer panel ── */
+  #layer-panel {
     position: absolute; top: 10px; right: 10px; z-index: 1000;
-    background: white; padding: 8px 12px; border-radius: 4px;
+    background: white; border-radius: 6px;
     box-shadow: 0 1px 5px rgba(0,0,0,0.3); font: 12px/1.5 sans-serif;
+    width: 240px; max-height: calc(100vh - 20px);
+    display: flex; flex-direction: column;
+    overflow: hidden;
   }
-  .species-dropdown select { margin-left: 4px; }
+  #layer-panel.collapsed { width: auto; max-height: none; }
+  #layer-panel.collapsed .lp-body,
+  #layer-panel.collapsed .lp-tabs,
+  #layer-panel.collapsed .lp-persistent { display: none; }
+  #layer-panel-toggle {
+    position: absolute; top: 10px; right: 10px; z-index: 1001;
+    background: white; border: none; border-radius: 4px;
+    box-shadow: 0 1px 5px rgba(0,0,0,0.3); cursor: pointer;
+    font-size: 16px; padding: 4px 8px; line-height: 1; display: none;
+  }
+  #layer-panel-toggle:hover { background: #eee; }
+  .lp-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 6px 10px; border-bottom: 1px solid #ddd;
+    font-weight: 600; color: #333;
+  }
+  .lp-header .lp-collapse { cursor: pointer; font-size: 16px; color: #888; border: none; background: none; }
+  .lp-header .lp-collapse:hover { color: #333; }
+  .lp-tabs {
+    display: flex; border-bottom: 1px solid #ddd;
+  }
+  .lp-tabs button {
+    flex: 1; border: none; background: #f5f5f5; padding: 5px 0;
+    font-size: 11px; font-weight: 600; cursor: pointer; color: #666;
+    border-bottom: 2px solid transparent;
+  }
+  .lp-tabs button:hover { background: #eaeaea; }
+  .lp-tabs button.active { background: white; color: #333; border-bottom-color: #4363d8; }
+  .lp-body {
+    overflow-y: auto; flex: 1; min-height: 0;
+  }
+  .lp-tab-content { display: none; padding: 6px 10px; }
+  .lp-tab-content.active { display: block; }
+  .lp-tab-content label {
+    display: block; padding: 3px 0; cursor: pointer; color: #333;
+  }
+  .lp-tab-content label:hover { background: #f0f4ff; margin: 0 -10px; padding: 3px 10px; }
+  .lp-tab-content input[type="checkbox"] { margin-right: 6px; }
+  .lp-persistent {
+    border-top: 1px solid #ddd; padding: 6px 10px;
+  }
+  .lp-persistent label { cursor: pointer; color: #333; }
+  .lp-persistent input[type="checkbox"] { margin-right: 6px; }
   #sidebar {
     position: absolute; top: 0; right: 0; width: 340px; height: 100%;
     background: #fafafa; border-left: 1px solid #ccc;
@@ -52,20 +100,100 @@
   .legend-label { font-weight: 600; color: #333; margin-bottom: 2px; }
   .legend-bar { height: 12px; border-radius: 2px; border: 1px solid #ccc; }
   .legend-range { display: flex; justify-content: space-between; color: #666; font-size: 10px; }
+  #toolbar .nav-btn {
+    background: #f0f0f0; border: 1px solid #ccc; border-radius: 3px;
+    cursor: pointer; font-size: 14px; padding: 2px 8px; line-height: 1;
+    color: #333; user-select: none;
+  }
+  #toolbar .nav-btn:hover { background: #e0e0e0; }
+  #toolbar .nav-btn:active { background: #d0d0d0; }
+  #toolbar .nav-btn:disabled { opacity: 0.3; cursor: default; }
+  #version-flash {
+    position: absolute; top: 50px; left: 50%; transform: translateX(-50%);
+    z-index: 1100; background: rgba(0,0,0,0.75); color: #fff;
+    padding: 8px 20px; border-radius: 6px; font: 600 16px/1.4 sans-serif;
+    pointer-events: none; opacity: 0; transition: opacity 0.15s ease;
+  }
+  #version-flash.show { opacity: 1; }
+
+  /* ── Timeline panel ── */
+  #timeline-toggle {
+    position: absolute; bottom: 0; left: 50%; transform: translateX(-50%);
+    z-index: 1001; background: white; border: 1px solid #ccc; border-bottom: none;
+    border-radius: 6px 6px 0 0; cursor: pointer; font: 600 12px/1 sans-serif;
+    padding: 5px 16px 4px; color: #555; user-select: none;
+    transition: bottom 0.15s ease;
+  }
+  #timeline-toggle:hover { background: #f0f0f0; color: #333; }
+  #timeline-toggle.panel-open { bottom: 250px; }
+  #timeline-panel {
+    position: absolute; left: 0; right: 0; bottom: 0; z-index: 1000;
+    height: 0; background: #fafafa; border-top: 1px solid #ccc;
+    display: flex; flex-direction: column; overflow: hidden;
+    transition: height 0.15s ease;
+  }
+  #timeline-panel.open { height: 250px; }
+  .tl-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 4px 12px; border-bottom: 1px solid #ddd; flex-shrink: 0;
+    font: 12px/1.5 sans-serif;
+  }
+  .tl-tabs { display: flex; gap: 0; }
+  .tl-tabs button {
+    border: none; background: #eee; padding: 4px 14px; font-size: 11px;
+    font-weight: 600; cursor: pointer; color: #666;
+    border-bottom: 2px solid transparent;
+  }
+  .tl-tabs button:first-child { border-radius: 4px 0 0 4px; }
+  .tl-tabs button:last-child { border-radius: 0 4px 4px 0; }
+  .tl-tabs button:hover { background: #e0e0e0; }
+  .tl-tabs button.active { background: white; color: #333; border-bottom-color: #4363d8; }
+  .tl-close { cursor: pointer; font-size: 16px; color: #888; border: none; background: none; }
+  .tl-close:hover { color: #333; }
+  .tl-body { flex: 1; min-height: 0; position: relative; padding: 4px 12px 8px; }
+  .tl-chart-container { position: absolute; top: 4px; left: 12px; right: 12px; bottom: 8px; display: none; }
+  .tl-chart-container.active { display: block; }
+  .tl-empty { color: #999; font: italic 13px/2 sans-serif; text-align: center; padding-top: 40px; }
 </style>
 </head>
 <body>
 <div id="map"></div>
 <div id="legend"></div>
 <div id="toolbar">
+  <button class="nav-btn" id="version-prev" title="Previous version (Left arrow)">&#9664;</button>
   <label>Version: <select id="version-select"></select></label>
+  <button class="nav-btn" id="version-next" title="Next version (Right arrow)">&#9654;</button>
 </div>
-<div class="species-dropdown" id="species-control" style="display:none">
-  <label>Species: <select id="species-select"></select></label>
+<div id="version-flash"></div>
+<div id="layer-panel">
+  <div class="lp-header">
+    <span>Layers</span>
+    <button class="lp-collapse" id="lp-collapse-btn" title="Collapse">&times;</button>
+  </div>
+  <div class="lp-tabs" id="lp-tabs"></div>
+  <div class="lp-body" id="lp-body"></div>
+  <div class="lp-persistent" id="lp-persistent"></div>
 </div>
+<button id="layer-panel-toggle" title="Show layers">&#9776;</button>
 <div id="sidebar">
   <span class="close-btn" id="sidebar-close">&times;</span>
   <div id="sidebar-content"></div>
+</div>
+<button id="timeline-toggle">&#9650; Timeline</button>
+<div id="timeline-panel">
+  <div class="tl-header">
+    <div class="tl-tabs" id="tl-tabs">
+      <button class="active" data-tab="population">Population</button>
+      <button data-tab="weather">Weather</button>
+      <button data-tab="diversity">Diversity</button>
+    </div>
+    <button class="tl-close" id="tl-close" title="Close timeline">&times;</button>
+  </div>
+  <div class="tl-body" id="tl-body">
+    <div class="tl-chart-container active" id="tl-population"><canvas id="chart-population"></canvas></div>
+    <div class="tl-chart-container" id="tl-weather"><canvas id="chart-weather"></canvas></div>
+    <div class="tl-chart-container" id="tl-diversity"><canvas id="chart-diversity"></canvas></div>
+  </div>
 </div>
 <script>
 (function () {
@@ -325,9 +453,7 @@
 
   // ── Layer controls ─────────────────────────────────────────
 
-  var layerControl = null;
-  var activeTileLayers = [];
-  var activeSpeciesLayer = null;
+  var activeTileLayers = {};  // key → L.tileLayer
 
   function makeTileLayer(tier, layer, isOverlay) {
     return L.tileLayer(
@@ -335,11 +461,6 @@
       { tileSize: 256, bounds: bounds, minZoom: 0, maxZoom: maxZoom, noWrap: true,
         opacity: isOverlay ? 0.6 : 1.0, pane: isOverlay ? "overlayPane" : "basePane" }
     );
-  }
-
-  // Layers to skip in the UI — internal simulation state, not useful visually.
-  function isInternalLayer(name) {
-    return name.match(/^seed_bank/) || name === "seed_bank_total";
   }
 
   // ── Legend ──────────────────────────────────────────────────
@@ -392,103 +513,184 @@
     legendEl.classList.remove("visible");
   }
 
+  // ── Layer panel ────────────────────────────────────────────
+
+  var layerPanel = document.getElementById("layer-panel");
+  var lpTabsEl = document.getElementById("lp-tabs");
+  var lpBodyEl = document.getElementById("lp-body");
+  var lpPersistent = document.getElementById("lp-persistent");
+  var lpCollapseBtn = document.getElementById("lp-collapse-btn");
+  var lpToggleBtn = document.getElementById("layer-panel-toggle");
+
+  lpCollapseBtn.addEventListener("click", function () {
+    layerPanel.style.display = "none";
+    lpToggleBtn.style.display = "block";
+  });
+
+  lpToggleBtn.addEventListener("click", function () {
+    layerPanel.style.display = "flex";
+    lpToggleBtn.style.display = "none";
+  });
+
+  // Categorize a layer into a tab (or null to skip).
+  function categorizeLayer(tier, name) {
+    if (tier === "geology") return "Terrain";
+    if (tier === "climate_hydrology") return "Climate";
+    if (tier === "ecology") {
+      if (name.match(/^species_.*_density$/)) return "Species";
+      if (name.match(/^seed_bank/)) return null;    // skip
+      if (name.match(/^biomass_age_/)) return null;  // skip
+      return "Ecology";
+    }
+    return "Ecology";  // fallback
+  }
+
+  // Display name for a layer.
+  function layerDisplayName(tier, name) {
+    if (name.match(/^species_.*_density$/)) {
+      return name.replace(/^species_/, "").replace(/_density$/, "").replace(/_/g, " ");
+    }
+    return name.replace(/_/g, " ");
+  }
+
+  var tabOrder = ["Terrain", "Climate", "Ecology", "Species"];
+  var activeTab = tabOrder[0];  // Track which tab is selected
+
+  // Track which layer keys the user has toggled on, so flipbook preserves them.
+  var userLayerSelection = null;  // null = use defaults; Set = explicit choices
+
   function buildLayers() {
-    activeTileLayers.forEach(function (tl) { map.removeLayer(tl); });
-    activeTileLayers = [];
-    if (activeSpeciesLayer) { map.removeLayer(activeSpeciesLayer); activeSpeciesLayer = null; }
-    if (layerControl) { map.removeControl(layerControl); layerControl = null; }
+    // Snapshot current selections before clearing, if any layers are active.
+    if (Object.keys(activeTileLayers).length > 0) {
+      userLayerSelection = new Set(Object.keys(activeTileLayers));
+    }
+
+    // Remove all existing tile layers from the map.
+    for (var key in activeTileLayers) {
+      map.removeLayer(activeTileLayers[key]);
+    }
+    activeTileLayers = {};
     clearAllLegends();
 
-    var speciesCtrl = document.getElementById("species-control");
-    var speciesSel = document.getElementById("species-select");
-    speciesCtrl.style.display = "none";
-    speciesSel.innerHTML = "";
+    // Clear panel contents.
+    lpTabsEl.innerHTML = "";
+    lpBodyEl.innerHTML = "";
+    lpPersistent.innerHTML = "";
 
     fetch("/api/world/" + version + "/metadata")
       .then(function (r) { return r.json(); })
       .then(function (meta) {
-        var overlays = {};
-        var speciesLayers = {};
-
-        // Map from Leaflet layer control label → {tier, name} for legend lookup.
-        var layerMeta = {};
+        // Bucket layers into tabs.
+        var tabs = {};
+        tabOrder.forEach(function (t) { tabs[t] = []; });
 
         var layers = meta.layers;
         for (var tier in layers) {
           var names = layers[tier];
           for (var i = 0; i < names.length; i++) {
             var name = names[i];
-
-            // Skip internal layers.
-            if (isInternalLayer(name)) continue;
-
-            // Species density → dropdown.
-            if (name.match(/^species_.*_density$/)) {
-              var sid = name.replace(/^species_/, "").replace(/_density$/, "");
-              speciesLayers[sid] = makeTileLayer(tier, name, true);
-              continue;
-            }
-
-            var label = tier + " / " + name;
-            var tl = makeTileLayer(tier, name, tier !== "geology");
-            overlays[label] = tl;
-            layerMeta[label] = { tier: tier, name: name };
-
-            // Default: heightmap on.
-            if (name === "heightmap") {
-              tl.addTo(map);
-              activeTileLayers.push(tl);
-              addLegendEntry(label, tier, name);
-            }
+            var tab = categorizeLayer(tier, name);
+            if (!tab) continue;
+            tabs[tab].push({ tier: tier, name: name, key: tier + "/" + name });
           }
         }
 
-        // Individuals toggle.
-        overlays["individuals"] = individualLayer;
-
-        layerControl = L.control.layers(null, overlays, { collapsed: false }).addTo(map);
-
-        map.on("overlayadd", function (e) {
-          activeTileLayers.push(e.layer);
-          if (layerMeta[e.name]) {
-            addLegendEntry(e.name, layerMeta[e.name].tier, layerMeta[e.name].name);
-          }
-        });
-        map.on("overlayremove", function (e) {
-          var idx = activeTileLayers.indexOf(e.layer);
-          if (idx >= 0) activeTileLayers.splice(idx, 1);
-          removeLegendEntry(e.name);
+        // Sort species by display name.
+        tabs.Species.sort(function (a, b) {
+          return layerDisplayName(a.tier, a.name).localeCompare(layerDisplayName(b.tier, b.name));
         });
 
-        var speciesIds = Object.keys(speciesLayers);
-        if (speciesIds.length > 0) {
-          speciesCtrl.style.display = "block";
-          var noneOpt = document.createElement("option");
-          noneOpt.value = "";
-          noneOpt.textContent = "(none)";
-          speciesSel.appendChild(noneOpt);
+        // Build tab buttons and content panes.
+        var tabContents = {};
+        tabOrder.forEach(function (tabName, idx) {
+          // Tab button.
+          var btn = document.createElement("button");
+          btn.textContent = tabName;
+          btn.dataset.tab = tabName;
+          if (tabName === activeTab) btn.className = "active";
+          btn.addEventListener("click", function () {
+            lpTabsEl.querySelectorAll("button").forEach(function (b) { b.classList.remove("active"); });
+            btn.classList.add("active");
+            activeTab = tabName;
+            lpBodyEl.querySelectorAll(".lp-tab-content").forEach(function (c) { c.classList.remove("active"); });
+            tabContents[tabName].classList.add("active");
+          });
+          lpTabsEl.appendChild(btn);
 
-          speciesIds.sort();
-          for (var s = 0; s < speciesIds.length; s++) {
-            var opt = document.createElement("option");
-            opt.value = speciesIds[s];
-            opt.textContent = speciesIds[s];
-            speciesSel.appendChild(opt);
+          // Content pane.
+          var pane = document.createElement("div");
+          pane.className = "lp-tab-content" + (tabName === activeTab ? " active" : "");
+          tabContents[tabName] = pane;
+
+          var items = tabs[tabName];
+          if (items.length === 0) {
+            var em = document.createElement("em");
+            em.style.color = "#999";
+            em.textContent = "No layers";
+            pane.appendChild(em);
+          } else {
+            items.forEach(function (item) {
+              var lbl = document.createElement("label");
+              var cb = document.createElement("input");
+              cb.type = "checkbox";
+              cb.dataset.key = item.key;
+              cb.dataset.tier = item.tier;
+              cb.dataset.layer = item.name;
+
+              // Restore previous selection, or default to heightmap.
+              var shouldBeOn = userLayerSelection
+                ? userLayerSelection.has(item.key)
+                : (item.name === "heightmap");
+              if (shouldBeOn) {
+                cb.checked = true;
+                var tl = makeTileLayer(item.tier, item.name, item.tier !== "geology");
+                tl.addTo(map);
+                activeTileLayers[item.key] = tl;
+                addLegendEntry(item.key, item.tier, item.name);
+              }
+
+              cb.addEventListener("change", function () {
+                var k = this.dataset.key;
+                var t = this.dataset.tier;
+                var ln = this.dataset.layer;
+                if (this.checked) {
+                  var layer = makeTileLayer(t, ln, t !== "geology");
+                  layer.addTo(map);
+                  activeTileLayers[k] = layer;
+                  addLegendEntry(k, t, ln);
+                } else {
+                  if (activeTileLayers[k]) {
+                    map.removeLayer(activeTileLayers[k]);
+                    delete activeTileLayers[k];
+                  }
+                  removeLegendEntry(k);
+                }
+              });
+
+              lbl.appendChild(cb);
+              lbl.appendChild(document.createTextNode(layerDisplayName(item.tier, item.name)));
+              pane.appendChild(lbl);
+            });
           }
 
-          speciesSel.onchange = function () {
-            if (activeSpeciesLayer) { map.removeLayer(activeSpeciesLayer); }
-            removeLegendEntry("species_density");
-            var sid = speciesSel.value;
-            if (sid && speciesLayers[sid]) {
-              activeSpeciesLayer = speciesLayers[sid];
-              activeSpeciesLayer.addTo(map);
-              addLegendEntry("species_density", "ecology", "species_" + sid + "_density");
-            } else {
-              activeSpeciesLayer = null;
-            }
-          };
-        }
+          lpBodyEl.appendChild(pane);
+        });
+
+        // Persistent section: individuals toggle.
+        var indLabel = document.createElement("label");
+        var indCb = document.createElement("input");
+        indCb.type = "checkbox";
+        indCb.checked = map.hasLayer(individualLayer);
+        indCb.addEventListener("change", function () {
+          if (this.checked) {
+            individualLayer.addTo(map);
+          } else {
+            map.removeLayer(individualLayer);
+          }
+        });
+        indLabel.appendChild(indCb);
+        indLabel.appendChild(document.createTextNode("Individuals"));
+        lpPersistent.appendChild(indLabel);
       });
   }
 
@@ -535,6 +737,511 @@
         buildLayers();
         loadIndividuals();
       }
+    }
+  });
+
+  // ── Flipbook navigation (prev/next version) ───────────────
+
+  var prevBtn = document.getElementById("version-prev");
+  var nextBtn = document.getElementById("version-next");
+  var flashEl = document.getElementById("version-flash");
+  var flashTimer = null;
+
+  function flashVersion() {
+    var opt = versionSelect.options[versionSelect.selectedIndex];
+    flashEl.textContent = opt ? opt.textContent : "v" + version;
+    flashEl.classList.add("show");
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(function () { flashEl.classList.remove("show"); }, 900);
+  }
+
+  function stepVersion(delta) {
+    var opts = versionSelect.options;
+    if (opts.length === 0) return;
+    var idx = versionSelect.selectedIndex + delta;
+    if (idx < 0 || idx >= opts.length) return;
+    versionSelect.selectedIndex = idx;
+    versionSelect.dispatchEvent(new Event("change"));
+    flashVersion();
+  }
+
+  function updateNavButtons() {
+    var opts = versionSelect.options;
+    prevBtn.disabled = (opts.length === 0 || versionSelect.selectedIndex <= 0);
+    nextBtn.disabled = (opts.length === 0 || versionSelect.selectedIndex >= opts.length - 1);
+  }
+
+  prevBtn.addEventListener("click", function () { stepVersion(-1); });
+  nextBtn.addEventListener("click", function () { stepVersion(1); });
+
+  // Update button state whenever version changes.
+  versionSelect.addEventListener("change", updateNavButtons);
+  // Initial state (buttons disabled until versions load).
+  updateNavButtons();
+
+  document.addEventListener("keydown", function (e) {
+    // Don't capture when an input/select/textarea is focused.
+    var tag = document.activeElement && document.activeElement.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+    if (e.key === "ArrowLeft") { e.preventDefault(); stepVersion(-1); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); stepVersion(1); }
+  });
+
+  // ── Timeline panel ────────────────────────────────────────────
+
+  var tlPanel = document.getElementById("timeline-panel");
+  var tlToggle = document.getElementById("timeline-toggle");
+  var tlClose = document.getElementById("tl-close");
+  var tlTabBtns = document.querySelectorAll("#tl-tabs button");
+  var tlContainers = document.querySelectorAll(".tl-chart-container");
+  var tlOpen = false;
+
+  // Chart instances
+  var chartPopulation = null;
+  var chartWeather = null;
+  var chartDiversity = null;
+  var tlDataLoaded = false;
+
+  // Cached timeline data
+  var tlSpeciesData = null;
+  var tlWeatherData = null;
+  var tlDiversityData = null;
+  var tlSnapshots = [];
+
+  function toggleTimeline(show) {
+    tlOpen = (show !== undefined) ? show : !tlOpen;
+    if (tlOpen) {
+      tlPanel.classList.add("open");
+      tlToggle.classList.add("panel-open");
+      mapEl.style.bottom = "250px";
+      legendEl.style.bottom = "270px";
+      tlToggle.innerHTML = "&#9660; Timeline";
+      if (!tlDataLoaded) loadTimelineData();
+    } else {
+      tlPanel.classList.remove("open");
+      tlToggle.classList.remove("panel-open");
+      mapEl.style.bottom = "0";
+      legendEl.style.bottom = "20px";
+      tlToggle.innerHTML = "&#9650; Timeline";
+    }
+    map.invalidateSize();
+  }
+
+  tlToggle.addEventListener("click", function () { toggleTimeline(); });
+  tlClose.addEventListener("click", function () { toggleTimeline(false); });
+
+  // Tab switching
+  tlTabBtns.forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      tlTabBtns.forEach(function (b) { b.classList.remove("active"); });
+      btn.classList.add("active");
+      tlContainers.forEach(function (c) { c.classList.remove("active"); });
+      document.getElementById("tl-" + btn.dataset.tab).classList.add("active");
+      // Resize the active chart so it fills its container
+      var activeChart = { population: chartPopulation, weather: chartWeather, diversity: chartDiversity }[btn.dataset.tab];
+      if (activeChart) activeChart.resize();
+    });
+  });
+
+  // Ancestor color palette: 6 ancestors get distinct base hues
+  var ancestorHues = [0, 120, 210, 45, 280, 170];  // red, green, blue, orange, purple, teal
+  function ancestorColor(ancestorIdx, alpha) {
+    var h = ancestorHues[ancestorIdx % ancestorHues.length];
+    return "hsla(" + h + ", 70%, 45%, " + (alpha || 1) + ")";
+  }
+  function ancestorColorLight(ancestorIdx, alpha) {
+    var h = ancestorHues[ancestorIdx % ancestorHues.length];
+    return "hsla(" + h + ", 60%, 65%, " + (alpha || 1) + ")";
+  }
+
+  // Get current version's year from the dropdown text
+  function currentVersionYear() {
+    var opt = versionSelect.options[versionSelect.selectedIndex];
+    if (!opt) return null;
+    var m = opt.textContent.match(/yr\s+(\d+)/);
+    return m ? parseInt(m[1], 10) : null;
+  }
+
+  // Build annotation config for snapshot lines + current version
+  function makeAnnotations() {
+    var annotations = {};
+    tlSnapshots.forEach(function (snap, i) {
+      annotations["snap_" + i] = {
+        type: "line",
+        xMin: snap.year, xMax: snap.year,
+        borderColor: "rgba(150, 150, 150, 0.5)",
+        borderWidth: 1,
+        borderDash: [4, 4],
+        label: { display: false }
+      };
+    });
+    var curYear = currentVersionYear();
+    if (curYear !== null) {
+      annotations["current"] = {
+        type: "line",
+        xMin: curYear, xMax: curYear,
+        borderColor: "#4363d8",
+        borderWidth: 2,
+        label: {
+          display: true,
+          content: "v" + version,
+          position: "start",
+          backgroundColor: "rgba(67, 99, 216, 0.8)",
+          font: { size: 10 },
+          padding: 3
+        }
+      };
+    }
+    return annotations;
+  }
+
+  // Update just the current-version annotation on all charts
+  function updateCurrentVersionMarker() {
+    var curYear = currentVersionYear();
+    [chartPopulation, chartWeather, chartDiversity].forEach(function (chart) {
+      if (!chart) return;
+      var ann = chart.options.plugins.annotation.annotations;
+      if (curYear !== null) {
+        ann.current = {
+          type: "line",
+          xMin: curYear, xMax: curYear,
+          borderColor: "#4363d8",
+          borderWidth: 2,
+          label: {
+            display: true,
+            content: "v" + version,
+            position: "start",
+            backgroundColor: "rgba(67, 99, 216, 0.8)",
+            font: { size: 10 },
+            padding: 3
+          }
+        };
+      } else {
+        delete ann.current;
+      }
+      chart.update("none");
+    });
+  }
+
+  // Click on chart near a snapshot: jump to that version
+  function handleChartClick(event, chart) {
+    var xScale = chart.scales.x;
+    if (!xScale) return;
+    var rect = chart.canvas.getBoundingClientRect();
+    var clickX = event.clientX || (event.native && event.native.clientX);
+    if (clickX === undefined) return;
+    var canvasX = clickX - rect.left;
+    var clickYear = xScale.getValueForPixel(canvasX);
+
+    // Find nearest snapshot within 3% of x-range
+    var range = xScale.max - xScale.min;
+    var threshold = range * 0.03;
+    var bestSnap = null;
+    var bestDist = Infinity;
+    tlSnapshots.forEach(function (snap) {
+      var d = Math.abs(snap.year - clickYear);
+      if (d < threshold && d < bestDist) {
+        bestDist = d;
+        bestSnap = snap;
+      }
+    });
+    if (bestSnap) {
+      // Find the version in the dropdown and select it
+      var opts = versionSelect.options;
+      for (var i = 0; i < opts.length; i++) {
+        if (parseInt(opts[i].value, 10) === bestSnap.version_id) {
+          versionSelect.selectedIndex = i;
+          versionSelect.dispatchEvent(new Event("change"));
+          flashVersion();
+          break;
+        }
+      }
+    }
+  }
+
+  function showEmpty(containerId, msg) {
+    var el = document.getElementById(containerId);
+    var canvas = el.querySelector("canvas");
+    canvas.style.display = "none";
+    var div = document.createElement("div");
+    div.className = "tl-empty";
+    div.textContent = msg || "No timeline data";
+    el.appendChild(div);
+  }
+
+  function buildPopulationChart(data) {
+    if (!data || !data.years || data.years.length === 0) {
+      showEmpty("tl-population");
+      return;
+    }
+
+    // Group species by ancestor
+    var speciesIds = Object.keys(data.species || {});
+    if (speciesIds.length === 0) { showEmpty("tl-population"); return; }
+
+    // Parse ancestor from species_id: "anc0_gen1_pop2" -> ancestor index 0
+    function getAncestor(sid) {
+      var m = sid.match(/^anc(\d+)/);
+      return m ? parseInt(m[1], 10) : 0;
+    }
+
+    // Build ancestor groups
+    var ancestorGroups = {};
+    speciesIds.forEach(function (sid) {
+      var anc = getAncestor(sid);
+      if (!ancestorGroups[anc]) ancestorGroups[anc] = [];
+      ancestorGroups[anc].push(sid);
+    });
+
+    // One thick line per ancestor (summed densities)
+    var datasets = [];
+    var ancestorKeys = Object.keys(ancestorGroups).sort(function (a, b) { return a - b; });
+    ancestorKeys.forEach(function (ancIdx) {
+      var sids = ancestorGroups[ancIdx];
+      var summed = data.years.map(function (_, yi) {
+        var sum = 0;
+        sids.forEach(function (sid) { sum += (data.species[sid][yi] || 0); });
+        return sum;
+      });
+      datasets.push({
+        label: "Ancestor " + ancIdx + " (" + sids.length + " spp)",
+        data: summed,
+        borderColor: ancestorColor(parseInt(ancIdx)),
+        backgroundColor: ancestorColorLight(parseInt(ancIdx), 0.1),
+        borderWidth: 2,
+        pointRadius: 0,
+        tension: 0.3,
+        fill: false
+      });
+    });
+
+    var ctx = document.getElementById("chart-population").getContext("2d");
+    chartPopulation = new Chart(ctx, {
+      type: "line",
+      data: { labels: data.years, datasets: datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          legend: { position: "right", labels: { boxWidth: 12, font: { size: 10 } } },
+          annotation: { annotations: makeAnnotations() },
+          tooltip: { callbacks: { label: function (ctx) { return ctx.dataset.label + ": " + ctx.parsed.y.toFixed(2); } } }
+        },
+        scales: {
+          x: { title: { display: true, text: "Year", font: { size: 11 } }, ticks: { font: { size: 10 } } },
+          y: { title: { display: true, text: "Total density", font: { size: 11 } }, ticks: { font: { size: 10 } }, beginAtZero: true }
+        },
+        onClick: function (event) { handleChartClick(event, chartPopulation); }
+      }
+    });
+  }
+
+  function buildWeatherChart(data) {
+    if (!data || !data.years || data.years.length === 0) {
+      showEmpty("tl-weather");
+      return;
+    }
+
+    var datasets = [];
+    // Temperature on left axis
+    if (data.temperature) {
+      datasets.push({
+        label: "Temperature",
+        data: data.temperature,
+        borderColor: "#e05530",
+        backgroundColor: "rgba(224, 85, 48, 0.05)",
+        borderWidth: 2,
+        pointRadius: 0,
+        tension: 0.3,
+        yAxisID: "yTemp",
+        fill: false,
+        order: 1
+      });
+    }
+    // Drought as filled area on temp axis
+    if (data.drought) {
+      datasets.push({
+        label: "Drought",
+        data: data.drought.map(function (d, i) { return d ? data.temperature[i] : null; }),
+        borderColor: "transparent",
+        backgroundColor: "rgba(255, 180, 60, 0.25)",
+        borderWidth: 0,
+        pointRadius: 0,
+        fill: "origin",
+        yAxisID: "yTemp",
+        order: 2,
+        spanGaps: false
+      });
+    }
+    // Precipitation on right axis
+    if (data.precipitation) {
+      datasets.push({
+        label: "Precipitation",
+        data: data.precipitation,
+        borderColor: "#3388cc",
+        backgroundColor: "rgba(51, 136, 204, 0.05)",
+        borderWidth: 2,
+        pointRadius: 0,
+        tension: 0.3,
+        yAxisID: "yPrecip",
+        fill: false,
+        order: 1
+      });
+    }
+
+    var scales = {
+      x: { title: { display: true, text: "Year", font: { size: 11 } }, ticks: { font: { size: 10 } } },
+      yTemp: {
+        type: "linear", position: "left",
+        title: { display: true, text: "Temperature", font: { size: 11 }, color: "#e05530" },
+        ticks: { font: { size: 10 }, color: "#e05530" },
+        grid: { drawOnChartArea: true }
+      },
+      yPrecip: {
+        type: "linear", position: "right",
+        title: { display: true, text: "Precipitation", font: { size: 11 }, color: "#3388cc" },
+        ticks: { font: { size: 10 }, color: "#3388cc" },
+        grid: { drawOnChartArea: false },
+        beginAtZero: true
+      }
+    };
+
+    var ctx = document.getElementById("chart-weather").getContext("2d");
+    chartWeather = new Chart(ctx, {
+      type: "line",
+      data: { labels: data.years, datasets: datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          legend: { position: "right", labels: { boxWidth: 12, font: { size: 10 } } },
+          annotation: { annotations: makeAnnotations() }
+        },
+        scales: scales,
+        onClick: function (event) { handleChartClick(event, chartWeather); }
+      }
+    });
+  }
+
+  function buildDiversityChart(data) {
+    if (!data || !data.years || data.years.length === 0) {
+      showEmpty("tl-diversity");
+      return;
+    }
+
+    var datasets = [];
+    // Total density as filled area
+    if (data.total_density) {
+      datasets.push({
+        label: "Total density",
+        data: data.total_density,
+        borderColor: "rgba(100, 160, 80, 0.5)",
+        backgroundColor: "rgba(100, 160, 80, 0.12)",
+        borderWidth: 1,
+        pointRadius: 0,
+        fill: true,
+        yAxisID: "yDensity",
+        order: 2
+      });
+    }
+    // Species count on left axis
+    if (data.species_count) {
+      datasets.push({
+        label: "Species count",
+        data: data.species_count,
+        borderColor: "#333",
+        borderWidth: 2,
+        pointRadius: 0,
+        tension: 0.3,
+        fill: false,
+        yAxisID: "yCount",
+        order: 1
+      });
+    }
+    // Shannon diversity on right axis
+    if (data.shannon) {
+      datasets.push({
+        label: "Shannon diversity",
+        data: data.shannon,
+        borderColor: "#9b59b6",
+        borderWidth: 2,
+        pointRadius: 0,
+        tension: 0.3,
+        fill: false,
+        yAxisID: "yShannon",
+        order: 1
+      });
+    }
+
+    var scales = {
+      x: { title: { display: true, text: "Year", font: { size: 11 } }, ticks: { font: { size: 10 } } },
+      yCount: {
+        type: "linear", position: "left",
+        title: { display: true, text: "Species count", font: { size: 11 }, color: "#333" },
+        ticks: { font: { size: 10 } },
+        beginAtZero: true,
+        grid: { drawOnChartArea: true }
+      },
+      yShannon: {
+        type: "linear", position: "right",
+        title: { display: true, text: "Shannon H'", font: { size: 11 }, color: "#9b59b6" },
+        ticks: { font: { size: 10 }, color: "#9b59b6" },
+        grid: { drawOnChartArea: false }
+      },
+      yDensity: {
+        type: "linear", position: "right",
+        display: false,
+        beginAtZero: true
+      }
+    };
+
+    var ctx = document.getElementById("chart-diversity").getContext("2d");
+    chartDiversity = new Chart(ctx, {
+      type: "line",
+      data: { labels: data.years, datasets: datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          legend: { position: "right", labels: { boxWidth: 12, font: { size: 10 } } },
+          annotation: { annotations: makeAnnotations() }
+        },
+        scales: scales,
+        onClick: function (event) { handleChartClick(event, chartDiversity); }
+      }
+    });
+  }
+
+  function loadTimelineData() {
+    // Fetch all timeline data in parallel
+    var fetches = [
+      fetch("/api/timeline/species").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      fetch("/api/timeline/weather").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      fetch("/api/timeline/diversity").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      fetch("/api/timeline/snapshots").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; })
+    ];
+
+    Promise.all(fetches).then(function (results) {
+      tlSpeciesData = results[0];
+      tlWeatherData = results[1];
+      tlDiversityData = results[2];
+      tlSnapshots = results[3] || [];
+
+      buildPopulationChart(tlSpeciesData);
+      buildWeatherChart(tlWeatherData);
+      buildDiversityChart(tlDiversityData);
+      tlDataLoaded = true;
+    });
+  }
+
+  // Hook into version changes to update the current-version marker
+  versionSelect.addEventListener("change", function () {
+    if (tlDataLoaded) {
+      // Small delay to let version variable update first
+      setTimeout(updateCurrentVersionMarker, 50);
     }
   });
 })();

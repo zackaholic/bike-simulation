@@ -39,7 +39,7 @@ def _cmap_for(layer_name: str) -> str:
 
 def _list_tiers(world: World) -> list[str]:
     """List all tier names in a world's raster store."""
-    return list(world.rasters._root.keys())
+    return world.rasters.list_tiers()
 
 
 def _render_all_layers(world: World, output_dir: Path) -> None:

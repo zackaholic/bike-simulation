@@ -23,7 +23,9 @@ columns to the x axis.
 
 from __future__ import annotations
 
+import math
 import re
+from collections import defaultdict
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -388,3 +390,199 @@ class WorldQuery:
             )
 
         return result
+
+    # -- timeline queries ---------------------------------------------------
+
+    def get_species_timeline(self, ancestor: str | None = None) -> dict:
+        """Return species population data aggregated to yearly resolution.
+
+        If *ancestor* is given, only include species descended from that
+        ancestor (matching species whose ID starts with the ancestor prefix,
+        or whose lineage traces back to it via parent_id).
+
+        Returns ``{"years": [...], "species": {species_id: [densities...]}}``.
+        """
+        summaries = self._world.events.get_tick_summaries()
+        if not summaries:
+            return {"years": [], "species": {}}
+
+        # If ancestor filter requested, resolve the set of matching species IDs
+        allowed_species: set[str] | None = None
+        if ancestor is not None:
+            all_species = self._world.events.list_species()
+            allowed_species = set()
+            # Build parent lookup
+            parent_map: dict[str, str | None] = {
+                sp["species_id"]: sp["parent_id"] for sp in all_species
+            }
+            for sp in all_species:
+                sid = sp["species_id"]
+                # Walk up lineage to check if ancestor is in the chain
+                cur = sid
+                while cur is not None:
+                    if cur == ancestor:
+                        allowed_species.add(sid)
+                        break
+                    cur = parent_map.get(cur)
+
+        # Group by (year_int, species_id) — take last tick per year
+        # year = tick * 0.25, so year_int = int(year)
+        # We want the last tick of each integer year
+        by_year_species: dict[int, dict[str, float]] = defaultdict(dict)
+        tick_by_year: dict[int, int] = {}
+        for row in summaries:
+            year_int = int(row["year"])
+            tick = row["tick"]
+            sid = row["species_id"]
+            if allowed_species is not None and sid not in allowed_species:
+                continue
+            # Keep the entry from the latest tick in each year
+            if year_int not in tick_by_year or tick >= tick_by_year[year_int]:
+                if tick > tick_by_year.get(year_int, -1):
+                    # New latest tick for this year — reset species for this year
+                    tick_by_year[year_int] = tick
+                    by_year_species[year_int] = {}
+                by_year_species[year_int][sid] = row["total_density"]
+
+        if not by_year_species:
+            return {"years": [], "species": {}}
+
+        years = sorted(by_year_species.keys())
+
+        # Collect all species that ever had density > 0
+        all_sids: set[str] = set()
+        for sp_map in by_year_species.values():
+            for sid, density in sp_map.items():
+                if density > 0:
+                    all_sids.add(sid)
+
+        species_data: dict[str, list[float]] = {}
+        for sid in sorted(all_sids):
+            species_data[sid] = [by_year_species[y].get(sid, 0.0) for y in years]
+
+        return {"years": [float(y) for y in years], "species": species_data}
+
+    def get_weather_timeline(self) -> dict:
+        """Return weather data aggregated to yearly means.
+
+        Returns ``{"years": [...], "temperature": [...], "precipitation": [...],
+        "drought": [...]}``.
+        """
+        weather = self._world.events.get_tick_weather()
+        if not weather:
+            return {"years": [], "temperature": [], "precipitation": [], "drought": []}
+
+        # Group by integer year, compute mean of each field
+        by_year: dict[int, list[dict]] = defaultdict(list)
+        for row in weather:
+            year_int = int(row["year"])
+            by_year[year_int].append(row)
+
+        years = sorted(by_year.keys())
+        temperature = []
+        precipitation = []
+        drought = []
+        for y in years:
+            rows = by_year[y]
+            n = len(rows)
+            temperature.append(sum(r["mean_temp"] for r in rows) / n)
+            precipitation.append(sum(r["mean_precip"] for r in rows) / n)
+            drought.append(sum(r["mean_drought"] for r in rows) / n)
+
+        return {
+            "years": [float(y) for y in years],
+            "temperature": temperature,
+            "precipitation": precipitation,
+            "drought": drought,
+        }
+
+    def get_diversity_timeline(self, threshold: float = 0.01) -> dict:
+        """Return diversity metrics aggregated to yearly resolution.
+
+        Returns ``{"years": [...], "species_count": [...], "shannon": [...],
+        "total_density": [...]}``.
+
+        *threshold* is the minimum total_density for a species to be counted
+        as present (for species_count and Shannon index).
+        """
+        summaries = self._world.events.get_tick_summaries()
+        if not summaries:
+            return {"years": [], "species_count": [], "shannon": [], "total_density": []}
+
+        # Group by year, take last tick per year (same logic as species timeline)
+        tick_by_year: dict[int, int] = {}
+        by_year: dict[int, dict[str, float]] = defaultdict(dict)
+        for row in summaries:
+            year_int = int(row["year"])
+            tick = row["tick"]
+            sid = row["species_id"]
+            if year_int not in tick_by_year or tick >= tick_by_year[year_int]:
+                if tick > tick_by_year.get(year_int, -1):
+                    tick_by_year[year_int] = tick
+                    by_year[year_int] = {}
+                by_year[year_int][sid] = row["total_density"]
+
+        years = sorted(by_year.keys())
+        species_count_list = []
+        shannon_list = []
+        total_density_list = []
+
+        for y in years:
+            densities = by_year[y]
+            total = sum(densities.values())
+            total_density_list.append(total)
+
+            # Count species above threshold
+            above = [d for d in densities.values() if d > threshold]
+            species_count_list.append(len(above))
+
+            # Shannon diversity index
+            if total > 0 and len(above) > 0:
+                h = 0.0
+                for d in above:
+                    p = d / total
+                    if p > 0:
+                        h -= p * math.log(p)
+                shannon_list.append(h)
+            else:
+                shannon_list.append(0.0)
+
+        return {
+            "years": [float(y) for y in years],
+            "species_count": species_count_list,
+            "shannon": shannon_list,
+            "total_density": total_density_list,
+        }
+
+    def get_disturbance_timeline(self) -> dict:
+        """Return fire and blowdown events for timeline display.
+
+        Returns ``{"fires": [{year, x, y, cells_burned}, ...],
+        "blowdowns": [{year, x, y, cells_affected}, ...]}``.
+        """
+        # Query all events across the full world extent and all time
+        all_events = self._world.events.get_events_in_region(
+            0, 0, 50_000, 50_000
+        )
+
+        fires = []
+        blowdowns = []
+        for ev in all_events:
+            if ev["event_type"] == "fire":
+                entry = {
+                    "year": ev["year"],
+                    "x": ev["x"],
+                    "y": ev["y"],
+                    "cells_burned": ev["data"].get("cells_burned", 0) if ev["data"] else 0,
+                }
+                fires.append(entry)
+            elif ev["event_type"] == "blowdown":
+                entry = {
+                    "year": ev["year"],
+                    "x": ev["x"],
+                    "y": ev["y"],
+                    "cells_affected": ev["data"].get("cells_affected", 0) if ev["data"] else 0,
+                }
+                blowdowns.append(entry)
+
+        return {"fires": fires, "blowdowns": blowdowns}

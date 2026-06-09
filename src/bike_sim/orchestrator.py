@@ -48,11 +48,15 @@ class Orchestrator:
         erosion_params: ErosionParams | None = None,
         seasonal_erosion_params: SeasonalErosionParams | None = None,
         seasonal_history_ticks: int = 0,
+        summary_interval: int = 4,
+        snapshot_interval: int = 400,
     ) -> None:
         self._world = world
         self._erosion_params = erosion_params
         self._seasonal_erosion_params = seasonal_erosion_params or SeasonalErosionParams()
         self._seasonal_history_ticks = seasonal_history_ticks
+        self._summary_interval = summary_interval
+        self._snapshot_interval = snapshot_interval
 
     def create_world(self) -> None:
         """Two-phase world creation: deep history (coarse) + seasonal recent history.
@@ -149,7 +153,28 @@ class Orchestrator:
             # 2. Tick ecology
             eco.tick(weather)
 
-            # 3. Seasonal erosion
+            # 3. Tick summary logging
+            current_tick = eco_clock.tick_number  # already advanced by eco.tick()
+            if self._summary_interval > 0 and current_tick % self._summary_interval == 0:
+                self._log_tick_summary(current_tick, year, season, weather)
+
+            # 4. Intermediate snapshot
+            if self._snapshot_interval > 0 and current_tick % self._snapshot_interval == 0 and current_tick > 0:
+                # Write terrain state before committing snapshot
+                store.write_layer(
+                    "climate_hydrology", "eroded_heightmap", eroded_hm.astype(np.float64), current_tick
+                )
+                store.write_layer(
+                    "climate_hydrology", "sediment_depth", sediment.astype(np.float64), current_tick
+                )
+                store.write_layer(
+                    "climate_hydrology", "flow_accumulation", flow_acc.astype(np.float64), current_tick
+                )
+                self._world.commit_version(trigger=f"snapshot at tick {current_tick}")
+                next_ver = self._world.current_version + 1
+                self._world.rasters.set_version(next_ver)
+
+            # 5. Seasonal erosion
             erode_seasonal(
                 eroded_hm,
                 sediment,
@@ -160,10 +185,10 @@ class Orchestrator:
                 self._seasonal_erosion_params,
             )
 
-            # 4. Thermal diffusion
+            # 6. Thermal diffusion
             thermal_diffusion(eroded_hm, sediment)
 
-            # 5. Recompute flow if needed
+            # 7. Recompute flow if needed
             ticks_since_flow_recompute += 1
             if ticks_since_flow_recompute >= self.FLOW_RECOMPUTE_INTERVAL:
                 combined = eroded_hm + sediment
@@ -181,6 +206,58 @@ class Orchestrator:
         store.write_layer(
             "climate_hydrology", "flow_accumulation", flow_acc.astype(np.float64), tick_num
         )
+
+    def _log_tick_summary(
+        self, tick: int, year: float, season: int, weather: object
+    ) -> None:
+        """Collect per-species and weather summaries and write to the EventStore."""
+        store = self._world.rasters
+        events = self._world.events
+        species_list = events.list_species()
+        ecology_layers = store.list_layers("ecology")
+
+        # Per-species summaries
+        summaries: list[dict] = []
+        for sp in species_list:
+            sid = sp["species_id"]
+            density_layer = f"species_{sid}_density"
+            if density_layer not in ecology_layers:
+                continue
+            density = store.read_layer("ecology", density_layer)
+            total_density = float(density.sum())
+            occupied_cells = int((density > 0).sum())
+
+            # Mean biomass age over occupied cells
+            age_layer = f"biomass_age_{sid}"
+            if age_layer in ecology_layers:
+                age = store.read_layer("ecology", age_layer)
+                mask = density > 0
+                mean_age = float(age[mask].mean()) if mask.any() else 0.0
+            else:
+                mean_age = 0.0
+
+            summaries.append({
+                "species_id": sid,
+                "total_density": total_density,
+                "occupied_cells": occupied_cells,
+                "mean_biomass_age": mean_age,
+            })
+
+        if summaries:
+            events.write_tick_summary(tick, year, season, summaries)
+
+        # Weather summary
+        mean_temp = float(weather.temperature.mean())
+        mean_precip = float(weather.precipitation.mean())
+
+        # Drought stress from ecology layer
+        if "drought_stress" in ecology_layers:
+            drought = store.read_layer("ecology", "drought_stress")
+            mean_drought = float(drought.mean())
+        else:
+            mean_drought = 0.0
+
+        events.write_tick_weather(tick, year, season, mean_temp, mean_precip, mean_drought)
 
     def _compute_flow_accumulation(self, heightmap: np.ndarray) -> np.ndarray:
         """D8 flow accumulation — reuses ClimateHydrologyTier's implementation."""
