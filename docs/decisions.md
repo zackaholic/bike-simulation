@@ -413,3 +413,75 @@ This is a set of foundational principles that refine (not replace) the original 
 **Why**: 200M years at 4 ticks/year = 800M ticks, which is impossible. Deep history just needs to produce plausible terrain and species radiation — it doesn't need seasonal fidelity. The transition to seasonal ticks for recent history ensures the world enters play with realistic seasonal patterns, seed banks, and weather-cycle-driven vegetation.
 
 **Full implementation spec**: `docs/seasonal-redesign-spec.md`
+
+## Ecology stabilization: self-correcting feedback loops
+
+**Context**: After the seasonal ecology redesign, calibration runs revealed two critical problems. First, 3 of 6 ancestor species couldn't establish because initial population seeding used winter weather (tick 0 = winter), giving warm-adapted species zero suitability. Second, once ancestor templates were tuned and seeding was fixed, a single ancestor (lowland herb) exploded to 184 species in 850 years, producing an O(n²) competition matrix that took 8+ hours and consumed 6.7GB of memory. The system lacked any mechanism to check runaway dominance or prevent cascade micro-speciation.
+
+These problems prompted a broader discussion about what "balance" means for the project. The goal is not to engineer a particular equilibrium, but to build a system with self-correcting tendencies that can recover from dramatic perturbations. A lowland herb bloom is fine — it's the Carboniferous fern forests — as long as the world has mechanisms to eventually check it. "A world that can die is one that matters" (from initial design docs), and a world out of balance is interesting as long as it can recover.
+
+### Decision: Annual-mean seeding for initial populations
+
+**Decision**: Initial population placement uses the base climate layers (annual mean temperature and precipitation) rather than the current season's weather.
+
+**Why**: Tick 0 is winter. Winter conditions give warm-loving species (lowland herb, valley tree) zero suitability across the entire grid. They're seeded with zero density and immediately fail the MVP check. Using annual means represents "where could this species potentially persist over a full year" — the ecologically correct question for initial placement.
+
+### Decision: Ancestor template tuning to match environmental range
+
+**Decision**: Adjusted three ancestor templates whose trait optima fell outside the world's actual environmental range:
+- Lowland herb: drought_tolerance 0.15 → 0.30
+- Valley tree: drought_tolerance 0.15 → 0.30
+- Alpine cushion: drought_tolerance 0.85 → 0.65, frost_tolerance 0.95 → 0.85
+
+**Why**: Diagnostic analysis showed the world's drought stress range is 0.30–0.68 and temp norm range is 0.05–0.80. Species with optima outside these ranges get near-zero suitability everywhere. The adjustments are minimal — each species remains the most extreme specialist on its axis — but now falls within the range where viable habitat exists.
+
+**Note**: Alpine cushion still goes extinct in calibration runs. Its niche (cold + dry) is the smallest habitat type in this world. This may be acceptable — not every ancestor needs to succeed in every world — or may indicate the world generation needs more extreme alpine habitat.
+
+### Decision: Seed-mass-driven long-distance dispersal
+
+**Decision**: Replace the flat 5% long-distance dispersal chance with a seed_mass-scaled mechanism. Light seeds (low seed_mass) get frequent long-range jumps (up to 50% of grid); heavy seeds get rare short jumps. Seeds are sourced from high-density cells and deposited proportionally.
+
+**Why**: The primary cause of cascade speciation was false fragmentation — a species covering 80% of the map has dozens of tiny gaps that register as separate connected components, each becoming a new species. Long-distance dispersal bridges these gaps by maintaining gene flow across habitat discontinuities. When speciation does happen, it means populations are genuinely isolated by inhospitable terrain, not just separated by a few empty cells. This also makes the `seed_mass` trait load-bearing — it now creates a real evolutionary tradeoff between dispersal range and establishment success.
+
+### Decision: Janzen-Connell biotic pressure (oscillating top-down mortality)
+
+**Decision**: Add a hidden "biotic pressure" variable per species that serves as a proxy for pathogens, herbivores, and fungi. Pressure accumulates when a species is abundant (total density > baseline), decays when rare, and is shared among close genetic relatives (genome distance < threshold). Applied as density-dependent mortality each tick.
+
+**Why**: The simulation lacked any top-down pressure on dominant species. In real ecosystems, monocultures attract specialized pathogens and herbivores that check their growth (the Janzen-Connell effect). Without this, a fast-growing generalist can fill every niche and fragment into hundreds of near-clone species. The hidden variable approach avoids modeling explicit herbivore agents while producing the key dynamic: boom-bust oscillations where dominant species build pressure, crash, then recover as pressure decays. Close relatives share pressure (representing shared pathogen pools), creating selection pressure for genetic divergence — species that diverge escape the pathogen shadow.
+
+**Key design choice**: Pressure is not a constant — it oscillates. This was a deliberate decision after discussing that top-down forces in nature have their own dynamics. A constant Janzen-Connell multiplier would produce stable equilibria; the oscillating hidden variable produces the cycles of dominance and decline that make ecosystems dynamic.
+
+**Parameters (tuned for 1000×1000 grid)**:
+- `baseline_density = 20,000` — pressure only builds above this (a healthy species has 10K–50K total density)
+- `growth_k = 0.0005` — slow accumulation to prevent immediate kills
+- `decay_rate = 0.95` — 5% decay per tick when species is sparse
+- `mortality_strength = 0.08` — max 8% mortality per tick at full pressure
+- `relatedness_threshold = 0.5` — genome distance below which pressure is shared
+
+**Storage**: One float per species in a `biotic_pressure` table in EventStore. Negligible cost.
+
+### Decision: Speciation threshold tuning
+
+**Decision**: Raised speciation thresholds significantly:
+- Minimum parent occupied cells: 100 → 500
+- Minimum fragment size: 50 → 200 (downsampled cells)
+- Speciation probability per eligible fragment: 0.3 → 0.15
+- Added 100-year cooldown: species must be ≥100 years old to speciate
+
+**Why**: The previous thresholds allowed a species to fragment into 10+ new species per check, each of which could fragment again 50 years later. The 100-year cooldown prevents cascade speciation — young species need time to establish their identity before fragmenting again. Higher minimum sizes ensure speciation events represent meaningful population isolation, not noise.
+
+**Result**: Calibration runs produce ~40 species over 1000 years (vs 244 previously), with healthy turnover (extinctions + new speciations). Runtime dropped from 8+ hours to ~90 minutes.
+
+### Future directions discussed
+
+Several ideas were discussed for future implementation but not yet built:
+
+1. **Climate-responsive speciation rates**: Lower speciation thresholds during extreme climate events, producing burst speciation when cycles align to create dramatic conditions. The weather system's overlapping cycles would naturally produce these rare windows.
+
+2. **Climate-responsive biotic pressure**: Modulate pressure growth/decay based on weather conditions (warm wet = pathogen-friendly = faster pressure buildup; cold dry = pressure decay). Creates windows where monocultures are temporarily safe, followed by crash periods.
+
+3. **Rare extreme climate configurations**: The current weather system uses regular sinusoidal cycles that don't produce truly extreme events. Adding long-period cycles (500-1000 years) with different phases would create rare constructive interference events — the engine for mass extinctions and speciation booms.
+
+4. **Lineage age effects on pressure**: Young species haven't accumulated their full pathogen/herbivore load ("enemy release" hypothesis). Could give new species a natural honeymoon period.
+
+These form a coherent system: rare extreme climate → habitat fragmentation + pressure collapse → speciation burst → new species fill altered landscape → pressure rebuilds → new equilibrium. The full cycle of disruption and recovery that makes worlds feel alive.
