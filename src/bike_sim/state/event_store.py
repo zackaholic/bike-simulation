@@ -122,6 +122,25 @@ class EventStore:
             for row in rows
         ]
 
+    # ── Biotic pressure ───────────────────────────────────────────────
+
+    def get_biotic_pressures(self) -> dict[str, float]:
+        """Return {species_id: pressure} for all species with pressure > 0."""
+        rows = self._conn.execute(
+            "SELECT species_id, pressure FROM biotic_pressure"
+        ).fetchall()
+        return {row["species_id"]: row["pressure"] for row in rows}
+
+    def set_biotic_pressures(self, pressures: dict[str, float]) -> None:
+        """Bulk update biotic pressure values. Removes entries for extinct species."""
+        cur = self._conn.cursor()
+        cur.execute("DELETE FROM biotic_pressure")
+        cur.executemany(
+            "INSERT INTO biotic_pressure (species_id, pressure) VALUES (?, ?)",
+            [(sid, p) for sid, p in pressures.items() if p > 0.001],
+        )
+        self._conn.commit()
+
     # ── Distinguished individuals ────────────────────────────────────
 
     def add_individual(
@@ -431,6 +450,11 @@ class EventStore:
                 mean_precip REAL NOT NULL,
                 mean_drought REAL NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS biotic_pressure (
+                species_id  TEXT PRIMARY KEY,
+                pressure    REAL NOT NULL DEFAULT 0.0
+            );
         """)
         self._conn.commit()
 
@@ -446,7 +470,7 @@ class EventStore:
             except sqlite3.OperationalError:
                 pass  # Column already exists
 
-        # Ensure tick_summary and tick_weather tables exist in older databases.
+        # Ensure tick_summary, tick_weather, and biotic_pressure tables exist.
         self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS tick_summary (
                 tick        INTEGER NOT NULL,
@@ -468,6 +492,11 @@ class EventStore:
                 mean_temp   REAL NOT NULL,
                 mean_precip REAL NOT NULL,
                 mean_drought REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS biotic_pressure (
+                species_id  TEXT PRIMARY KEY,
+                pressure    REAL NOT NULL DEFAULT 0.0
             );
         """)
         self._conn.commit()

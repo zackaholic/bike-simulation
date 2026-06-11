@@ -108,13 +108,7 @@
   #toolbar .nav-btn:hover { background: #e0e0e0; }
   #toolbar .nav-btn:active { background: #d0d0d0; }
   #toolbar .nav-btn:disabled { opacity: 0.3; cursor: default; }
-  #version-flash {
-    position: absolute; top: 50px; left: 50%; transform: translateX(-50%);
-    z-index: 1100; background: rgba(0,0,0,0.75); color: #fff;
-    padding: 8px 20px; border-radius: 6px; font: 600 16px/1.4 sans-serif;
-    pointer-events: none; opacity: 0; transition: opacity 0.15s ease;
-  }
-  #version-flash.show { opacity: 1; }
+  #version-flash { display: none; }
 
   /* ── Timeline panel ── */
   #timeline-toggle {
@@ -186,6 +180,7 @@
       <button class="active" data-tab="population">Population</button>
       <button data-tab="weather">Weather</button>
       <button data-tab="diversity">Diversity</button>
+      <button data-tab="speciation">Speciation</button>
     </div>
     <button class="tl-close" id="tl-close" title="Close timeline">&times;</button>
   </div>
@@ -193,6 +188,7 @@
     <div class="tl-chart-container active" id="tl-population"><canvas id="chart-population"></canvas></div>
     <div class="tl-chart-container" id="tl-weather"><canvas id="chart-weather"></canvas></div>
     <div class="tl-chart-container" id="tl-diversity"><canvas id="chart-diversity"></canvas></div>
+    <div class="tl-chart-container" id="tl-speciation"><canvas id="chart-speciation"></canvas></div>
   </div>
 </div>
 <script>
@@ -800,12 +796,14 @@
   var chartPopulation = null;
   var chartWeather = null;
   var chartDiversity = null;
+  var chartSpeciation = null;
   var tlDataLoaded = false;
 
   // Cached timeline data
   var tlSpeciesData = null;
   var tlWeatherData = null;
   var tlDiversityData = null;
+  var tlSpeciationData = null;
   var tlSnapshots = [];
 
   function toggleTimeline(show) {
@@ -838,7 +836,7 @@
       tlContainers.forEach(function (c) { c.classList.remove("active"); });
       document.getElementById("tl-" + btn.dataset.tab).classList.add("active");
       // Resize the active chart so it fills its container
-      var activeChart = { population: chartPopulation, weather: chartWeather, diversity: chartDiversity }[btn.dataset.tab];
+      var activeChart = { population: chartPopulation, weather: chartWeather, diversity: chartDiversity, speciation: chartSpeciation }[btn.dataset.tab];
       if (activeChart) activeChart.resize();
     });
   });
@@ -898,7 +896,7 @@
   // Update just the current-version annotation on all charts
   function updateCurrentVersionMarker() {
     var curYear = currentVersionYear();
-    [chartPopulation, chartWeather, chartDiversity].forEach(function (chart) {
+    [chartPopulation, chartWeather, chartDiversity, chartSpeciation].forEach(function (chart) {
       if (!chart) return;
       var ann = chart.options.plugins.annotation.annotations;
       if (curYear !== null) {
@@ -979,9 +977,9 @@
     var speciesIds = Object.keys(data.species || {});
     if (speciesIds.length === 0) { showEmpty("tl-population"); return; }
 
-    // Parse ancestor from species_id: "anc0_gen1_pop2" -> ancestor index 0
+    // Parse ancestor from species_id: "anc_02_valley_tree" -> ancestor index 2
     function getAncestor(sid) {
-      var m = sid.match(/^anc(\d+)/);
+      var m = sid.match(/^anc_(\d+)/);
       return m ? parseInt(m[1], 10) : 0;
     }
 
@@ -1215,13 +1213,185 @@
     });
   }
 
+  function buildSpeciationChart(data) {
+    if (!data || !data.species || data.species.length === 0) {
+      showEmpty("tl-speciation", "No speciation data");
+      return;
+    }
+
+    var species = data.species;
+    var maxYear = data.max_year || 1000;
+
+    // Assign y-position: group by ancestor, then order by appeared_year
+    // within each ancestor group
+    var byAncestor = {};
+    species.forEach(function (sp) {
+      var a = sp.ancestor;
+      if (!byAncestor[a]) byAncestor[a] = [];
+      byAncestor[a].push(sp);
+    });
+
+    var ancestorKeys = Object.keys(byAncestor).sort(function (a, b) { return a - b; });
+    var yPos = {};  // species_id -> y position
+    var yCounter = 0;
+    var ancestorBands = [];  // {ancestor, yStart, yEnd} for background shading
+
+    ancestorKeys.forEach(function (ancIdx) {
+      var group = byAncestor[ancIdx];
+      group.sort(function (a, b) { return a.appeared_year - b.appeared_year; });
+      var yStart = yCounter;
+      group.forEach(function (sp) {
+        yPos[sp.species_id] = yCounter;
+        yCounter++;
+      });
+      ancestorBands.push({ ancestor: parseInt(ancIdx), yStart: yStart, yEnd: yCounter - 1 });
+    });
+
+    var totalSpecies = yCounter;
+
+    // Build datasets: one line segment per species (appeared -> extinct/maxYear)
+    // and vertical branch lines connecting parent to child
+    var datasets = [];
+
+    // Species lifespan lines — one dataset per ancestor for legend grouping
+    ancestorKeys.forEach(function (ancIdx) {
+      var group = byAncestor[ancIdx];
+      var color = ancestorColor(parseInt(ancIdx));
+
+      // Each species is a segment: [{x: appeared, y: yPos}, {x: end, y: yPos}]
+      // Use individual datasets per species for proper line rendering
+      group.forEach(function (sp, i) {
+        var endYear = sp.extinct_year !== null ? sp.extinct_year : maxYear;
+        var y = yPos[sp.species_id];
+
+        // Compute max density for this species to scale line width
+        var maxDensity = 0;
+        if (sp.population) {
+          sp.population.forEach(function (p) {
+            if (p.density > maxDensity) maxDensity = p.density;
+          });
+        }
+        var lineWidth = maxDensity > 0 ? Math.max(1.5, Math.min(6, maxDensity / 5000)) : 1.5;
+
+        // Display name: strip ancestor prefix for readability
+        var displayName = sp.species_id.replace(/^anc_\d+_/, "");
+        if (displayName === sp.species_id) displayName = sp.species_id;
+
+        datasets.push({
+          label: i === 0 ? "Ancestor " + ancIdx + " (" + group.length + " spp)" : "",
+          data: [{ x: sp.appeared_year, y: y }, { x: endYear, y: y }],
+          borderColor: sp.extinct_year !== null ? ancestorColorLight(parseInt(ancIdx), 0.5) : color,
+          borderWidth: lineWidth,
+          pointRadius: [3, 0],  // dot at origin, nothing at end
+          pointBackgroundColor: color,
+          pointBorderColor: color,
+          showLine: true,
+          fill: false,
+          _speciesId: sp.species_id,
+          _displayName: displayName,
+          _ancestor: parseInt(ancIdx),
+          _extinct: sp.extinct_year !== null
+        });
+      });
+    });
+
+    // Branch lines: vertical dashed lines from parent's y to child's y at child's appeared_year
+    species.forEach(function (sp) {
+      if (sp.parent_id && yPos[sp.parent_id] !== undefined) {
+        var parentY = yPos[sp.parent_id];
+        var childY = yPos[sp.species_id];
+        datasets.push({
+          label: "",
+          data: [{ x: sp.appeared_year, y: parentY }, { x: sp.appeared_year, y: childY }],
+          borderColor: "rgba(150, 150, 150, 0.4)",
+          borderWidth: 1,
+          borderDash: [3, 3],
+          pointRadius: 0,
+          showLine: true,
+          fill: false
+        });
+      }
+    });
+
+    // Build y-axis labels (species names, abbreviated)
+    var yLabels = new Array(totalSpecies);
+    species.forEach(function (sp) {
+      var y = yPos[sp.species_id];
+      var name = sp.species_id.replace(/^anc_\d+_/, "").substring(0, 20);
+      yLabels[y] = name;
+    });
+
+    var ctx = document.getElementById("chart-speciation").getContext("2d");
+    chartSpeciation = new Chart(ctx, {
+      type: "scatter",
+      data: { datasets: datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: {
+          mode: "nearest",
+          intersect: false,
+          axis: "y"
+        },
+        plugins: {
+          legend: {
+            position: "right",
+            labels: {
+              boxWidth: 12,
+              font: { size: 10 },
+              filter: function (item) { return item.text !== ""; }
+            }
+          },
+          annotation: { annotations: makeAnnotations() },
+          tooltip: {
+            callbacks: {
+              label: function (ctx) {
+                var ds = ctx.dataset;
+                if (!ds._speciesId) return "";
+                var status = ds._extinct ? " (extinct)" : " (extant)";
+                return ds._speciesId + status;
+              }
+            }
+          }
+        },
+        scales: {
+          x: {
+            type: "linear",
+            title: { display: true, text: "Year", font: { size: 11 } },
+            ticks: { font: { size: 10 } },
+            min: 0,
+            max: maxYear
+          },
+          y: {
+            type: "linear",
+            reverse: false,
+            title: { display: false },
+            min: -0.5,
+            max: totalSpecies - 0.5,
+            ticks: {
+              font: { size: 9 },
+              stepSize: 1,
+              callback: function (value) {
+                var idx = Math.round(value);
+                return yLabels[idx] || "";
+              }
+            },
+            grid: { display: false }
+          }
+        },
+        onClick: function (event) { handleChartClick(event, chartSpeciation); }
+      }
+    });
+  }
+
   function loadTimelineData() {
     // Fetch all timeline data in parallel
     var fetches = [
       fetch("/api/timeline/species").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
       fetch("/api/timeline/weather").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
       fetch("/api/timeline/diversity").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
-      fetch("/api/timeline/snapshots").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; })
+      fetch("/api/timeline/snapshots").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      fetch("/api/timeline/speciation").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; })
     ];
 
     Promise.all(fetches).then(function (results) {
@@ -1229,10 +1399,12 @@
       tlWeatherData = results[1];
       tlDiversityData = results[2];
       tlSnapshots = results[3] || [];
+      tlSpeciationData = results[4];
 
       buildPopulationChart(tlSpeciesData);
       buildWeatherChart(tlWeatherData);
       buildDiversityChart(tlDiversityData);
+      buildSpeciationChart(tlSpeciationData);
       tlDataLoaded = true;
     });
   }

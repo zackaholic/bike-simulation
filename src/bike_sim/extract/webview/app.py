@@ -166,6 +166,10 @@ def create_app(world_dir: str | Path) -> Flask:
     def api_timeline_diversity():
         return jsonify(query.get_diversity_timeline())
 
+    @app.route("/api/timeline/speciation")
+    def api_timeline_speciation():
+        return jsonify(query.get_speciation_timeline())
+
     @app.route("/api/timeline/disturbance")
     def api_timeline_disturbance():
         return jsonify(query.get_disturbance_timeline())

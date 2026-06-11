@@ -554,6 +554,92 @@ class WorldQuery:
             "total_density": total_density_list,
         }
 
+    def get_speciation_timeline(self) -> dict:
+        """Return species tree and population history for the speciation chart.
+
+        Returns::
+
+            {
+                "species": [
+                    {
+                        "species_id": "anc0_...",
+                        "parent_id": "anc0" | null,
+                        "ancestor": 0,
+                        "appeared_year": 0.0,
+                        "extinct_year": null | 500.0,
+                        "population": [
+                            {"year": 0.0, "density": 1234.5},
+                            ...
+                        ]
+                    },
+                    ...
+                ],
+                "max_year": 1000.0
+            }
+        """
+        all_species = self._world.events.list_species()
+        if not all_species:
+            return {"species": [], "max_year": 0.0}
+
+        # Build species info lookup
+        species_info: dict[str, dict] = {}
+        for sp in all_species:
+            sid = sp["species_id"]
+            full = self._world.events.get_species(sid)
+            species_info[sid] = full
+
+        # Build parent lookup for ancestor resolution
+        parent_map: dict[str, str | None] = {
+            sid: info["parent_id"] for sid, info in species_info.items()
+        }
+
+        def get_ancestor_idx(sid: str) -> int:
+            """Walk up lineage to find root ancestor index."""
+            m = re.match(r"^anc_(\d+)", sid)
+            return int(m.group(1)) if m else 0
+
+        # Get population history from tick summaries
+        summaries = self._world.events.get_tick_summaries()
+
+        # Group by (year_int, species_id) — last tick per year
+        tick_by_year: dict[int, int] = {}
+        by_year_species: dict[int, dict[str, float]] = defaultdict(dict)
+        for row in summaries:
+            year_int = int(row["year"])
+            tick = row["tick"]
+            sid = row["species_id"]
+            if year_int not in tick_by_year or tick >= tick_by_year[year_int]:
+                if tick > tick_by_year.get(year_int, -1):
+                    tick_by_year[year_int] = tick
+                    by_year_species[year_int] = {}
+                by_year_species[year_int][sid] = row["total_density"]
+
+        years = sorted(by_year_species.keys())
+
+        # Build per-species population arrays
+        pop_by_species: dict[str, list[dict]] = defaultdict(list)
+        for y in years:
+            for sid, density in by_year_species[y].items():
+                pop_by_species[sid].append({"year": float(y), "density": density})
+
+        max_year = float(years[-1]) if years else 0.0
+
+        result = []
+        for sid, info in species_info.items():
+            result.append({
+                "species_id": sid,
+                "parent_id": info["parent_id"],
+                "ancestor": get_ancestor_idx(sid),
+                "appeared_year": info["appeared_year"],
+                "extinct_year": info["extinct_year"],
+                "population": pop_by_species.get(sid, []),
+            })
+
+        # Sort by appeared_year then species_id for stable ordering
+        result.sort(key=lambda s: (s["appeared_year"], s["species_id"]))
+
+        return {"species": result, "max_year": max_year}
+
     def get_disturbance_timeline(self) -> dict:
         """Return fire and blowdown events for timeline display.
 
