@@ -1,17 +1,17 @@
-"""Weather system — deterministic per-season weather from overlapping sinusoidal cycles.
+"""Weather system — deterministic per-season weather from fractal noise (fBm).
 
 Generates seasonal weather conditions (temperature, precipitation, frost, storm
-intensity) by evaluating a set of overlapping sinusoidal cycles whose parameters
-are derived deterministically from the world seed.  The cycles operate at
-timescales from a few years (ENSO-like oscillations) to tens of thousands of
-years (Milankovitch-like drift), producing weather that has both short-term
-variability and deep historical trends.
+intensity) by evaluating 1D fractional Brownian motion (fBm) at the requested
+time.  Multiple octaves of value noise produce aperiodic climate variability
+with a red-noise power spectrum: low frequencies (century-scale trends) dominate,
+overlaid with progressively smaller high-frequency variation.  Every "climate
+epoch" is unique — unlike sinusoidal cycles, the noise never repeats.
 
 The base climate (temperature from latitude + lapse rate, precipitation from
 orographic effects) is computed once from the geology heightmap.  Each call to
-``generate()`` evaluates all cycles at the requested (year, season) and applies
-the resulting anomalies spatially, respecting topographic amplification (valleys
-amplify temperature swings, mountains amplify precipitation swings).
+``generate()`` evaluates the fractal noise at the requested (year, season) and
+applies the resulting anomalies spatially, respecting topographic amplification
+(valleys amplify temperature swings, mountains amplify precipitation swings).
 
 All randomness flows through ``create_rng`` with tier_id="weather", ensuring
 full reproducibility from the world seed.
@@ -20,7 +20,7 @@ full reproducibility from the world seed.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import exp, pi, sin
+from math import exp
 
 import numpy as np
 
@@ -30,17 +30,6 @@ from bike_sim.rng import create_rng
 # ---------------------------------------------------------------------------
 # Dataclasses
 # ---------------------------------------------------------------------------
-
-
-@dataclass
-class WeatherCycle:
-    """A single sinusoidal cycle contributing to weather variability."""
-
-    period: float  # years
-    amplitude: float  # strength (unitless multiplier or absolute offset)
-    phase: float  # 0 to 2*pi, derived from seed
-    target: str  # "temperature", "precipitation", or "both"
-    correlation: float  # for "both": positive = warm&wet, negative = warm&dry
 
 
 @dataclass
@@ -70,17 +59,53 @@ _STORM_SCALE_FACTOR = 2.0
 
 
 # ---------------------------------------------------------------------------
+# 1D fractal noise helpers
+# ---------------------------------------------------------------------------
+
+
+def _hash_float(seed: int, i: int) -> float:
+    """Deterministic float in [-1, 1] from seed and integer position.
+
+    Uses murmurhash-style bit mixing, masked to 32 bits so Python's
+    arbitrary-precision ints behave like a hardware hash.
+    """
+    h = (seed ^ (i * 0x9E3779B9)) & 0xFFFFFFFF
+    h = (((h >> 16) ^ h) * 0x45D9F3B) & 0xFFFFFFFF
+    h = (((h >> 16) ^ h) * 0x45D9F3B) & 0xFFFFFFFF
+    h = ((h >> 16) ^ h) & 0xFFFFFFFF
+    return (h & 0xFFFFFF) / 0x800000 - 1.0  # map to [-1, 1]
+
+
+def _smoothstep(t: float) -> float:
+    """Smooth interpolation curve: 3t² - 2t³."""
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _noise1d(seed: int, t: float) -> float:
+    """Deterministic 1D value noise at position *t*, seeded.
+
+    Hashes floor(t) and ceil(t) to get two deterministic values,
+    then smoothstep-interpolates between them.
+    """
+    i = int(np.floor(t))
+    frac = t - i
+    v0 = _hash_float(seed, i)
+    v1 = _hash_float(seed, i + 1)
+    return v0 + (v1 - v0) * _smoothstep(frac)
+
+
+# ---------------------------------------------------------------------------
 # WeatherSystem
 # ---------------------------------------------------------------------------
 
 
 class WeatherSystem:
-    """Deterministic weather generator driven by overlapping sinusoidal cycles.
+    """Deterministic weather generator driven by fractal noise (fBm).
 
     Parameters
     ----------
     world_seed : int
-        Master seed for the world — all cycle parameters derive from this.
+        Master seed for the world — fractal parameters derive from this.
     geology_heightmap : np.ndarray
         (H, W) elevation in metres from the geology tier.
     grid_size : int
@@ -99,7 +124,20 @@ class WeatherSystem:
         self._world_seed = world_seed
         self.grid_size = grid_size
         self.cell_size = cell_size
-        self.cycles = self._generate_cycles(world_seed)
+
+        # Fractal noise parameters
+        self._num_octaves = 7
+        self._base_freq = 1.0 / 800.0   # lowest octave wavelength ~800 years
+        self._lacunarity = 2.0           # each octave doubles in frequency
+        self._persistence = 0.55         # each octave has 55% of previous amplitude
+        self._base_amp_temp = 3.0        # lowest octave: ±3°C
+        self._base_amp_precip = 0.15     # lowest octave: ±15% precip (log space)
+
+        # Independent noise seeds for temperature and precipitation
+        rng = create_rng(world_seed, "weather", "fractal", 0)
+        self._seed_temp = int(rng.integers(0, 2**31))
+        self._seed_precip = int(rng.integers(0, 2**31))
+
         self._base_temp, self._base_precip = self._compute_base_climate(
             geology_heightmap
         )
@@ -129,7 +167,7 @@ class WeatherSystem:
         SeasonalWeather
         """
         time = year + season * 0.25
-        temp_anomaly, precip_multiplier = self._evaluate_cycles(time)
+        temp_anomaly, precip_multiplier = self._evaluate_climate(time)
 
         temp_scale, precip_scale = _SEASON_SCALES[season]
 
@@ -171,68 +209,25 @@ class WeatherSystem:
             season=season,
         )
 
-    def get_cycles(self) -> list[WeatherCycle]:
-        """Return the list of cycles for serialization / inspection."""
-        return list(self.cycles)
+    def get_climate_params(self) -> dict:
+        """Return fractal climate parameters for serialization / inspection."""
+        return {
+            "num_octaves": self._num_octaves,
+            "base_freq": self._base_freq,
+            "lacunarity": self._lacunarity,
+            "persistence": self._persistence,
+            "base_amp_temp": self._base_amp_temp,
+            "base_amp_precip": self._base_amp_precip,
+            "seed_temp": self._seed_temp,
+            "seed_precip": self._seed_precip,
+        }
 
     # ------------------------------------------------------------------
-    # Cycle generation
+    # Fractal climate evaluation
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _generate_cycles(world_seed: int) -> list[WeatherCycle]:
-        """Deterministically generate 8-9 weather cycles from the world seed."""
-        rng = create_rng(world_seed, "weather", "cycles", 0)
-        cycles: list[WeatherCycle] = []
-
-        def _add(
-            period_lo: float,
-            period_hi: float,
-            amp_lo: float,
-            amp_hi: float,
-            target: str,
-            correlation: float = 0.0,
-        ) -> None:
-            cycles.append(
-                WeatherCycle(
-                    period=rng.uniform(period_lo, period_hi),
-                    amplitude=rng.uniform(amp_lo, amp_hi),
-                    phase=rng.uniform(0, 2 * pi),
-                    target=target,
-                    correlation=correlation,
-                )
-            )
-
-        # Short cycles (year-to-year variability)
-        _add(3, 7, 0.1, 0.2, "precipitation")       # ±10-20% precip
-        _add(4, 8, 0.3, 0.8, "temperature")         # ±0.3-0.8°C
-
-        # Medium cycles (ride-to-ride mood shifts)
-        _add(25, 50, 0.1, 0.15, "precipitation")    # ±10-15% precip
-        _add(30, 70, 0.5, 1.0, "temperature")       # ±0.5-1.0°C
-
-        # Compound cycles (1-2)
-        n_compound = rng.integers(1, 3)  # 1 or 2
-        for _ in range(int(n_compound)):
-            corr = rng.uniform(-0.5, 0.5)
-            _add(15, 40, 0.08, 0.12, "both", correlation=corr)
-
-        # Long cycles (month-to-month drift)
-        _add(200, 500, 0.08, 0.15, "precipitation")  # ±8-15% precip
-        _add(300, 800, 1.0, 2.0, "temperature")      # ±1-2°C
-
-        # Very long drift (deep-time climate)
-        corr = rng.uniform(-0.2, 0.2)
-        _add(50_000, 150_000, 1.5, 3.0, "both", correlation=corr)  # ±1.5-3°C
-
-        return cycles
-
-    # ------------------------------------------------------------------
-    # Cycle evaluation
-    # ------------------------------------------------------------------
-
-    def _evaluate_cycles(self, time: float) -> tuple[float, float]:
-        """Evaluate all cycles at a given time, returning anomalies.
+    def _evaluate_climate(self, time: float) -> tuple[float, float]:
+        """Evaluate fractal noise at *time*, returning climate anomalies.
 
         Returns
         -------
@@ -242,24 +237,21 @@ class WeatherSystem:
             Multiplicative precipitation factor (always > 0).
         """
         temp_anomaly = 0.0
-        precip_log_anomaly = 0.0  # work in log space for multiplicative
+        precip_anomaly = 0.0
 
-        for cycle in self.cycles:
-            value = cycle.amplitude * sin(
-                2 * pi * time / cycle.period + cycle.phase
-            )
-            if cycle.target == "temperature":
-                temp_anomaly += value
-            elif cycle.target == "precipitation":
-                precip_log_anomaly += value
-            elif cycle.target == "both":
-                temp_anomaly += value
-                precip_log_anomaly += value * cycle.correlation
+        for octave in range(self._num_octaves):
+            freq = self._base_freq * (self._lacunarity ** octave)
+            amp_t = self._base_amp_temp * (self._persistence ** octave)
+            amp_p = self._base_amp_precip * (self._persistence ** octave)
 
-        precip_multiplier = exp(precip_log_anomaly)  # always positive
-        # Cap to prevent extreme conditions from constructive cycle alignment
-        precip_multiplier = max(0.3, min(precip_multiplier, 2.5))
-        temp_anomaly = max(-5.0, min(temp_anomaly, 5.0))
+            temp_anomaly += _noise1d(self._seed_temp, time * freq) * amp_t
+            precip_anomaly += _noise1d(self._seed_precip, time * freq) * amp_p
+
+        precip_multiplier = exp(precip_anomaly)  # always positive
+
+        # Safety caps — wide enough that they rarely bind
+        temp_anomaly = max(-8.0, min(temp_anomaly, 8.0))
+        precip_multiplier = max(0.25, min(precip_multiplier, 3.0))
         return temp_anomaly, precip_multiplier
 
     # ------------------------------------------------------------------
@@ -339,8 +331,7 @@ class WeatherSystem:
         rng = create_rng(self._world_seed, "weather", "frost", tick_encoding)
 
         # Sigma scales with absolute temperature anomaly (colder = more variable)
-        _, precip_mult = self._evaluate_cycles(year + season * 0.25)
-        temp_anom, _ = self._evaluate_cycles(year + season * 0.25)
+        temp_anom, precip_mult = self._evaluate_climate(year + season * 0.25)
         sigma = 0.05 + 0.05 * min(abs(temp_anom), 5.0)  # cap contribution
 
         frost_event = rng.normal(0, sigma, temperature.shape)

@@ -301,7 +301,7 @@ class EcologyTier:
         # Biotic pressure: oscillating top-down mortality from pathogens/herbivores
         # Skip first 8 ticks (2 years) — let species establish before pressure builds
         if tick_num >= 8:
-            self._apply_biotic_pressure(species_list, densities)
+            self._apply_biotic_pressure(species_list, densities, weather)
 
         # Check for species extinction (minimum viable population)
         # Skip on tick 0 — species were just created and need time to establish
@@ -1123,12 +1123,16 @@ class EcologyTier:
         self,
         species_list: list,
         densities: dict,
+        weather: SeasonalWeather,
     ) -> None:
         """Oscillating top-down pressure from pathogens/herbivores/fungi.
 
         Pressure accumulates when a species (or its close relatives) is abundant,
         and decays when rare.  Applied as density-dependent mortality.
         This creates boom-bust cycles without explicit animal agents.
+
+        Climate responsiveness: warm + wet conditions favour pathogens (faster
+        pressure buildup), cold + dry conditions suppress them (faster decay).
         """
         # Load current pressure state
         pressures = self._world.events.get_biotic_pressures()
@@ -1139,7 +1143,7 @@ class EcologyTier:
             sid = sp["species_id"]
             genomes[sid] = self._world.events.get_species(sid)["genome"]
 
-        # Parameters — tuned for a 1000x1000 grid where a healthy species
+        # Base parameters — tuned for a 1000x1000 grid where a healthy species
         # has ~10,000-50,000 total density across all cells.
         growth_k = 0.0005  # how fast pressure builds per unit density above baseline
         decay_rate = 0.95  # pressure decays by 5% per tick when species is sparse
@@ -1147,6 +1151,17 @@ class EcologyTier:
         relatedness_threshold = 0.5  # genome distance below which pressure is shared
         max_pressure = 1.0  # cap to prevent runaway
         mortality_strength = 0.08  # max mortality fraction at full pressure
+
+        # Climate modulation — warm + wet = pathogen-friendly
+        mean_temp = float(weather.temperature.mean())
+        mean_precip = float(weather.precipitation.mean())
+        temp_factor = float(np.clip((mean_temp - 2.0) / 16.0, 0, 1))    # 2°C→0, 18°C→1
+        precip_factor = float(np.clip(mean_precip / 2000.0, 0, 1))      # 0mm→0, 2000mm→1
+        pathogen_favorability = temp_factor * precip_factor               # 0 to 1
+
+        # Modulate: growth_k 50%-150% of base, decay faster when unfavorable
+        growth_k = growth_k * (0.5 + pathogen_favorability)
+        decay_rate = decay_rate + (1.0 - decay_rate) * 0.5 * (1.0 - pathogen_favorability)
 
         # Update pressure for each species
         for sp in species_list:
