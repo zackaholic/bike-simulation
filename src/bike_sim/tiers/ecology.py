@@ -1306,6 +1306,13 @@ class EcologyTier:
         current_year = self._world.tier_clocks[TIER].simulated_year
         species_list = self._world.events.list_species(alive_at_year=current_year)
 
+        # Niche saturation: speciation gets harder as niches fill up.
+        alive_count = len(species_list)
+        saturation_factor = max(0.1, 1.0 - alive_count / 100.0)
+        base_speciation_prob = 0.15 * saturation_factor
+
+        min_genome_divergence = 0.15  # reject speciation if daughter too similar
+
         for sp in species_list:
             sid = sp["species_id"]
 
@@ -1346,7 +1353,7 @@ class EcologyTier:
                 if fragment_size < 200:
                     continue
 
-                if rng.random() < 0.15:
+                if rng.random() < base_speciation_prob:
                     parent_genome = self._world.events.get_species(sid)["genome"]
 
                     # ── Adaptive drift: bias toward local environment ──
@@ -1391,6 +1398,13 @@ class EcologyTier:
                             # Unbounded traits (max_height, lifespan)
                             drift = float(rng.normal(0, 0.1))
                             new_genome[key] = max(0.1, val + val * drift)
+
+                    # Reject speciation if daughter isn't genetically distinct enough.
+                    # Geographic separation alone doesn't make a new species —
+                    # the fragment must have diverged under different selection pressure.
+                    divergence = self._genome_distance(new_genome, parent_genome)
+                    if divergence < min_genome_divergence:
+                        continue
 
                     new_id = f"{sid}_d{tick_number}_{c}"
                     self._world.events.add_species(

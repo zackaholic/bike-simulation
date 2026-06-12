@@ -485,3 +485,68 @@ Several ideas were discussed for future implementation but not yet built:
 4. **Lineage age effects on pressure**: Young species haven't accumulated their full pathogen/herbivore load ("enemy release" hypothesis). Could give new species a natural honeymoon period.
 
 These form a coherent system: rare extreme climate → habitat fragmentation + pressure collapse → speciation burst → new species fill altered landscape → pressure rebuilds → new equilibrium. The full cycle of disruption and recovery that makes worlds feel alive.
+
+## Fractal climate noise + climate-responsive biotic pressure
+
+**Context**: The sinusoidal weather cycle system produced periodic, predictable oscillations — every rare event recurred on a fixed schedule. Extended calibration runs (24+ hours, 508 species) confirmed that the system lacked the climate variability needed to drive meaningful perturbation/recovery dynamics. Additionally, biotic pressure used fixed parameters regardless of environmental conditions.
+
+### Decision: Replace sinusoidal cycles with 1D fractional Brownian motion (fBm)
+
+**Decision**: The weather system now evaluates 7 octaves of 1D value noise instead of 8-9 overlapping sine waves. Two independent noise streams (temperature, precipitation) are seeded from the world seed via hash-based deterministic noise.
+
+**Why**: Fractal noise produces aperiodic variability with a red-noise power spectrum — low frequencies dominate (century-scale trends), with progressively smaller high-frequency variation overlaid. This means:
+- Every climate epoch is unique; nothing repeats
+- "Trends within trends" — zoom into any 200-year window and it shows its own internal structure
+- Rare extreme alignments emerge naturally from the mathematics, without being engineered
+- The power spectrum matches real climate data far better than superposed sinusoids
+
+Real climate data shows fractal structure, not discrete frequency peaks. No matter how many sine waves are overlaid, the result repeats at the LCM of all periods. The fractal approach eliminates this fundamental limitation.
+
+**Parameters**: base_freq=1/800 (lowest octave ~800yr), lacunarity=2.0, persistence=0.55, base_amp_temp=3.0°C, base_amp_precip=0.15 (log-space). Safety caps widened to ±8°C temp, [0.25, 3.0] precip multiplier (rarely hit — natural falloff from persistence keeps anomalies bounded).
+
+**Verification**: 5000-year trace for seed 42 shows mean temp anomaly -1.26°C (std 1.59), max year-to-year change 0.043°C. Each 200-year window has distinct character. Caps never hit.
+
+### Decision: Climate-responsive biotic pressure
+
+**Decision**: The Janzen-Connell biotic pressure system now responds to weather conditions. A "pathogen favorability" score (0-1) is computed from mean temperature × mean precipitation each tick. This modulates `growth_k` (50-150% of base) and `decay_rate` (faster decay in cold/dry conditions).
+
+**Why**: In real ecosystems, pathogen and herbivore pressure varies with climate. Warm wet conditions favour disease; cold dry conditions suppress it. With fixed pressure parameters, the system reaches a steady oscillation. With climate-responsive parameters, the dynamics become richer:
+- **Warm wet period**: pressure builds faster → dominant species crash sooner → more turnover
+- **Cold dry period**: pressure decays → dominant species get a reprieve → temporary expansion
+- **Cold→warm transition**: species that expanded during cold window suddenly face pressure → potential crash
+- **Warm→cold transition**: pressure drops but species already depleted → slow recovery
+
+This creates asymmetric dynamics around climate transitions — perturbation followed by recovery into a new equilibrium, which is the core dynamic the project is designed to produce.
+
+## Speciation rate-limiting: genetic divergence + niche saturation
+
+**Context**: Extended calibration revealed a fundamental structural problem with fragmentation-based speciation. A widespread species has tiny gaps in its distribution on the 1000×1000 grid; each gap registers as a separate fragment; each fragment that passes the probability check becomes a new species; each new species fragments again. This cascade produced 508 species from 6 ancestors in a 24-hour run, with O(n²) competition scaling making each tick progressively slower. The speciation threshold tuning from the ecology stabilization work (min fragment 200, min occupied 500, 15% prob, 100yr cooldown) slowed the cascade but didn't address the root cause: spatial separation alone, without meaningful genetic divergence, shouldn't produce new species.
+
+### Decision: Minimum genetic divergence threshold for speciation
+
+**Decision**: After computing a new genome for a candidate daughter species, measure the Euclidean genome distance (in functional trait space) between the daughter and parent genomes. If the distance is below a threshold (0.15), reject the speciation — the fragment stays part of the parent species.
+
+**Why**: This is the most mechanistically honest solution. Geographic separation alone doesn't drive speciation in nature — it's geographic separation *plus different selection pressures* that does it. A fragment on a cold ridge diverges from a fragment in a warm valley because their genomes are being pulled in different directions by local conditions. The existing adaptive drift mechanism already biases genome mutation toward local environmental optima (strength 0.3). This means:
+
+- Fragments in environments *similar* to the parent's range get small, similar mutations → low genome distance → speciation rejected → fragment stays as part of parent population
+- Fragments in *different* environments get directional mutations toward local optima → higher genome distance → speciation accepted → genuinely distinct species
+
+**Critical interaction with fractal climate**: Climate disruptions become the primary speciation engine through two mechanisms:
+1. **Creating separation**: A harsh climate epoch kills a species in marginal habitat, splitting one continuous population into isolated fragments
+2. **Driving divergence**: Fragments experience different local conditions (temperature, drought, frost), so their genomes drift apart through differential selection
+
+When conditions improve, the now-distinct species re-expand and overlap — real sympatric diversity that emerged from process, not from a probability roll. This means speciation rate naturally accelerates during and after climate disruptions (exactly when it should) and naturally slows during stable periods (when populations are continuous and fragments don't diverge).
+
+**Threshold choice (0.15)**: At the current drift sigma of 0.08 per functional trait (7 traits), a single speciation event produces an expected genome distance of roughly `sqrt(7) * 0.08 ≈ 0.21`. But this is the *average* — many events will produce less divergence. The 0.15 threshold rejects the bottom ~30% of speciation attempts where the daughter barely differs from the parent. Fragments under genuinely different selection pressure (where adaptive bias adds to random drift) easily clear the threshold. This is tuneable.
+
+**World filling dynamics**: This threshold naturally allows rapid speciation during early world history (when habitats are empty, fragments colonize diverse environments and diverge quickly) and slows speciation as niches fill (when most fragments are in environments similar to the parent's optimum). This addresses the concern about needing fast speciation during world creation but not wanting runaway speciation during normal play.
+
+### Decision: Soft niche saturation scaling
+
+**Decision**: Speciation probability scales inversely with total alive species count: `prob *= max(0.1, 1.0 - alive_count / 100.0)`. At 50 species, probability is halved. At 90+, it's 10% of base rate. Never reaches zero.
+
+**Why**: Complements the genetic divergence threshold with a system-level brake. Even with the divergence requirement, a sufficiently heterogeneous landscape could sustain high speciation rates indefinitely. Niche saturation represents the ecological reality that finite landscapes have finite niche space — as species count rises, the remaining unfilled niches are smaller and more marginal. The soft scaling (never reaching zero) preserves the possibility of speciation even in a "full" world — if conditions are extreme enough to create genuinely novel habitat, a new species can still emerge.
+
+**Not a hard cap**: A global maximum species count was considered and rejected as too artificial. The saturation scaling achieves the same practical effect (asymptotic slowdown) while remaining responsive to conditions. A world with 80 diverse species in genuinely distinct niches can still speciate; a world with 80 near-clone species finds it very difficult.
+
+**Combined effect**: The two mechanisms work at different levels. Genetic divergence is a per-event gate (is this particular fragment genuinely distinct?). Niche saturation is a population-level brake (how full is the world?). Together they produce the desired behavior: rapid early radiation → gradual slowdown → climate-disruption-driven bursts → new equilibrium.
