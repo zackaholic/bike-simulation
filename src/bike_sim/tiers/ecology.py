@@ -1312,6 +1312,11 @@ class EcologyTier:
         base_speciation_prob = 0.15 * saturation_factor
 
         min_genome_divergence = 0.15  # reject speciation if daughter too similar
+        pressure_inheritance = 0.6   # daughter inherits 60% of parent's pressure
+
+        # Load pressure state so daughters can inherit parent pressure
+        pressures = self._world.events.get_biotic_pressures()
+        pressures_changed = False
 
         for sp in species_list:
             sid = sp["species_id"]
@@ -1411,6 +1416,13 @@ class EcologyTier:
                         new_id, new_genome, parent_id=sid, appeared_year=current_year
                     )
 
+                    # Daughter inherits a fraction of parent's pathogen pressure.
+                    # Speciation doesn't grant a clean escape from the pathogen shadow.
+                    parent_pressure = pressures.get(sid, 0.0)
+                    if parent_pressure > 0.01:
+                        pressures[new_id] = parent_pressure * pressure_inheritance
+                        pressures_changed = True
+
                     # Transfer fragment density to new species.
                     new_density = np.where(fragment_mask, density, 0.0)
                     density = np.where(fragment_mask, 0.0, density)
@@ -1430,3 +1442,7 @@ class EcologyTier:
 
             # Update parent density (fragments removed).
             store.write_layer(TIER, layer_name, density.astype(np.float64), tick_number)
+
+        # Persist inherited pressure for any new daughter species.
+        if pressures_changed:
+            self._world.events.set_biotic_pressures(pressures)
