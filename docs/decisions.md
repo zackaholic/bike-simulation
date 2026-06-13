@@ -550,3 +550,54 @@ When conditions improve, the now-distinct species re-expand and overlap — real
 **Not a hard cap**: A global maximum species count was considered and rejected as too artificial. The saturation scaling achieves the same practical effect (asymptotic slowdown) while remaining responsive to conditions. A world with 80 diverse species in genuinely distinct niches can still speciate; a world with 80 near-clone species finds it very difficult.
 
 **Combined effect**: The two mechanisms work at different levels. Genetic divergence is a per-event gate (is this particular fragment genuinely distinct?). Niche saturation is a population-level brake (how full is the world?). Together they produce the desired behavior: rapid early radiation → gradual slowdown → climate-disruption-driven bursts → new equilibrium.
+
+### Outcome: rate-limiting alone was insufficient
+
+Calibration v5 (1050 years) showed that genetic divergence + niche saturation slowed speciation but didn't change the fundamental dynamic. Lowland herb still reached 67 of 92 species, with speciation *accelerating* (13.5/century by year 1000). The herb evolved to escape our pressure strategy: each daughter sat just below the baseline_density threshold (~18.7K vs 20K baseline), avoiding pressure accumulation. Pressure inheritance (v6, 60% of parent pressure inherited by daughter) also failed to change the trajectory.
+
+The root cause was structural: the fragmentation mechanic rewarded spatial dominance with more speciation opportunities. A generalist covering 83% of the map always has spatial gaps — but those gaps are suitable habitat, not barriers. Success → fragmentation → speciation was backwards.
+
+## Barrier-based speciation: environment-driven isolation
+
+**Context**: After three calibration runs showed that parameter tuning couldn't fix the speciation cascade, we stepped back to rethink the mechanic itself. The core insight: geographic separation alone doesn't drive speciation — it requires prolonged isolation across an environmental barrier under different selection pressures.
+
+### Decision: Require inhospitable terrain between fragment and main population
+
+**Decision**: After finding a fragment via connected components, compute suitability for the species on the downsampled grid. BFS flood fill from the fragment through hospitable cells (suitability > 0.2). If the flood reaches the main population, reject the speciation — the gap is traversable habitat, not a barrier.
+
+**Why**: A species covering 80% of the map has dozens of tiny gaps that register as fragments. But those gaps are perfectly good habitat the species just hasn't filled yet — dispersal will bridge them. A real barrier is a mountain ridge with near-zero suitability, a drought zone, a frost belt. These are environmental features that the species genuinely cannot cross. By requiring barriers, speciation becomes driven by the environment (terrain, climate) rather than by spatial noise in the density grid.
+
+**Critical interaction with fractal climate**: This makes climate the primary speciation engine:
+1. Wet period → species expands continuously across lowlands → no barriers → no speciation
+2. Dry period → drought zone emerges, splitting habitat → populations isolate behind barrier
+3. Centuries of isolation under different conditions → genomes diverge
+4. Wet period returns → barrier dissolves → two now-distinct species overlap and compete
+
+The fractal noise ensures these barrier-creating events are aperiodic and unique — every world's evolutionary history reflects its specific climate epochs.
+
+**Emergent seed_mass tradeoff**: Light-seeded species (herbs, grasses) have high long-distance dispersal that bridges barriers, naturally *preventing* their speciation. Heavy-seeded species (trees) can't jump barriers and are more likely to genuinely isolate. This produces realistic patterns without parameter tuning — wind-dispersed species have wider ranges and lower speciation rates, while heavy-seeded species show more local endemism.
+
+### Calibration v7 results (seed 42, 4000 years)
+
+| Year | Species | Herb | Tree | Others |
+|------|---------|------|------|--------|
+| 400 | 8 | 3 | 1 | 4 |
+| 800 | 11 | 4 | 3 | 4 |
+| 2000 | 15 | 8 | 3 | 4 |
+| 2400-2800 | 15 | 8 | 3 | 4 |
+| 4000 | 18 | 8 | 6 | 4 |
+
+- **Zero extinctions** across 4000 years. All 6 ancestors have living descendants including alpine cushion.
+- **Herb stabilized at 8 species** since year 2000 — no runaway.
+- **Valley tree** is the late-game speciation story (1→3→6), driven by real terrain barriers. Heavy seeds can't bridge gaps, so tree populations genuinely isolate.
+- **Speciation rate**: 8 in first 800yr, then 1/400yr, then 0 for 800yr, then a burst of 2 trees at year 4000. Exactly the pattern of asymptotic decline with rare climate-driven bursts.
+- **Runtime**: 7.2 hours for 4000 years (vs 5+ hours for 1000 years in v5 with 89 species).
+
+Compare v5 (no barrier check): 89 species at year 1050, 67 herbs, accelerating speciation, 508 species after 24 hours of compute with no sign of stabilizing.
+
+### Future direction: gene flow / species reabsorption
+
+Discussed but not yet implemented: when a barrier dissolves and two populations reconnect, species with similar enough genomes (below a merge threshold) could be reabsorbed into one population. The merged species would gain a slight adaptation from the isolate (adaptive introgression). This would:
+- Make speciation a two-way door: briefly isolated populations merge back, adding resilience
+- Only populations isolated long enough to diverge past the merge threshold become permanent species
+- Create a cycle: isolate → diverge slightly → merge back with added adaptation → expand range → new isolation opportunity
