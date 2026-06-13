@@ -204,6 +204,36 @@ def _bfs_label(mask: NDArray[np.bool_]) -> NDArray[np.int32]:
     return labels
 
 
+def _fragments_connect_through_hospitable(
+    fragment: NDArray[np.bool_],
+    main: NDArray[np.bool_],
+    hospitable: NDArray[np.bool_],
+) -> bool:
+    """BFS from *fragment* through *hospitable* cells; return True if it reaches *main*.
+
+    All arrays must be the same shape (typically the downsampled 100×100 grid).
+    A True result means there is no real barrier — the species could grow
+    through the gap — so speciation should be rejected.
+    """
+    rows, cols = fragment.shape
+    # Seed BFS from all fragment cells
+    visited = fragment.copy()
+    queue = list(zip(*np.where(fragment)))
+    head = 0
+    while head < len(queue):
+        r, c = queue[head]
+        head += 1
+        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < rows and 0 <= nc < cols and not visited[nr, nc]:
+                if main[nr, nc]:
+                    return True  # reached main population — no barrier
+                if hospitable[nr, nc]:
+                    visited[nr, nc] = True
+                    queue.append((nr, nc))
+    return False  # couldn't reach main — barrier exists
+
+
 def _connected_components_coarse(
     mask: NDArray[np.bool_], downsample: int = 10
 ) -> NDArray[np.int32]:
@@ -1350,6 +1380,24 @@ class EcologyTier:
                 component_sizes.append(int((components == c).sum()))
             main_component = int(np.argmax(component_sizes)) + 1
 
+            # Compute suitability on downsampled grid for barrier check.
+            # A fragment separated only by hospitable terrain (suitability > 0.2)
+            # is not behind a real barrier — dispersal will reconnect it.
+            parent_genome = self._world.events.get_species(sid)["genome"]
+            if weather is not None:
+                suit_full = self._compute_suitability_from_weather(parent_genome, weather)
+                ds = 10  # must match downsample used for components
+                cr, cc = suit_full.shape[0] // ds, suit_full.shape[1] // ds
+                suit_coarse = (
+                    suit_full[: cr * ds, : cc * ds]
+                    .reshape(cr, ds, cc, ds)
+                    .mean(axis=(1, 3))
+                )
+                hospitable_coarse = suit_coarse > 0.2
+                main_mask_coarse = components[::ds, ::ds][:cr, :cc] == main_component
+            else:
+                hospitable_coarse = None
+
             for c in range(1, n_components + 1):
                 if c == main_component:
                     continue
@@ -1358,9 +1406,17 @@ class EcologyTier:
                 if fragment_size < 200:
                     continue
 
-                if rng.random() < base_speciation_prob:
-                    parent_genome = self._world.events.get_species(sid)["genome"]
+                # Barrier check: reject if fragment connects to main through
+                # hospitable terrain.  Only real environmental barriers
+                # (mountains, drought zones) should allow speciation.
+                if hospitable_coarse is not None:
+                    frag_coarse = components[::ds, ::ds][:cr, :cc] == c
+                    if _fragments_connect_through_hospitable(
+                        frag_coarse, main_mask_coarse, hospitable_coarse
+                    ):
+                        continue  # no barrier — skip this fragment
 
+                if rng.random() < base_speciation_prob:
                     # ── Adaptive drift: bias toward local environment ──
                     # Compute mean environmental conditions over the fragment
                     local_env: dict[str, float] = {}
