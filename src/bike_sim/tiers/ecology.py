@@ -496,13 +496,13 @@ class EcologyTier:
         # Normalize precipitation to [0, 1] range
         precip_norm = np.clip(weather.precipitation / 2000.0, 0, 1)
         drought_stress = 1.0 - precip_norm
-        suit *= _gaussian_match(drought_stress, genome["drought_tolerance"], sigma=0.2)
+        suit *= _gaussian_match(drought_stress, genome["drought_tolerance"], sigma=0.14)
 
         # Temperature suitability
         # Normalize temperature to a preference scale
         temp_norm = np.clip((weather.temperature - (-10)) / 30.0, 0, 1)  # -10C to 20C range
         warmth_preference = 1.0 - genome["frost_tolerance"]
-        suit *= _gaussian_match(temp_norm, warmth_preference, sigma=0.2)
+        suit *= _gaussian_match(temp_norm, warmth_preference, sigma=0.14)
 
         # Light competition via canopy shading (max_height becomes load-bearing)
         if canopy_shade is not None:
@@ -948,16 +948,35 @@ class EcologyTier:
             pass
         return np.zeros((self.GRID_SIZE, self.GRID_SIZE), dtype=np.float64)
 
+    def _get_base_precipitation(self) -> NDArray[np.float64]:
+        """Return the base climate precipitation (terrain-modulated, no weather anomaly).
+
+        This is the precipitation field written by ClimateHydrologyTier at world
+        creation — the long-term average that weather anomalies perturb around.
+        Cached after first read.
+        """
+        if not hasattr(self, "_base_precip_cache"):
+            store = self._world.rasters
+            if "precipitation" in store.list_layers("climate_hydrology"):
+                self._base_precip_cache = store.read_layer(
+                    "climate_hydrology", "precipitation"
+                ).copy()
+            else:
+                # Fallback: use a uniform baseline
+                self._base_precip_cache = np.full(
+                    (self.GRID_SIZE, self.GRID_SIZE), 800.0, dtype=np.float64
+                )
+        return self._base_precip_cache
+
     def _update_cumulative_drought(self, weather: SeasonalWeather) -> None:
         drought = self._load_drought_stress()
         if weather.season == 2:  # Summer
-            # Normal precip is ~560mm for summer (800 * 0.7)
-            # Drought stress accumulates for cells below average precipitation.
-            # The multiplier from weather cycles means some years are globally dry;
-            # spatial variation from terrain creates locally dry cells.
-            normal_precip = weather.precipitation.mean()
-            # Relative deficit: how far below average each cell is (0 if above average)
-            deficit = np.clip(1.0 - weather.precipitation / (normal_precip + 1e-10), 0, None)
+            # Compare current precipitation to the fixed base climate envelope.
+            # This makes drought stress accumulate during genuinely dry epochs
+            # rather than self-cancelling against the shifted mean.
+            base_precip = self._get_base_precipitation()
+            # Relative deficit: how far below the base each cell is (0 if above)
+            deficit = np.clip(1.0 - weather.precipitation / (base_precip + 1e-10), 0, None)
             drought = drought * 0.7 + deficit * 0.3
         else:
             drought *= 0.9  # slow recovery
@@ -1178,7 +1197,6 @@ class EcologyTier:
         # has ~10,000-50,000 total density across all cells.
         growth_k = 0.0005  # how fast pressure builds per unit density above baseline
         decay_rate = 0.95  # pressure decays by 5% per tick when species is sparse
-        baseline_density = 20000.0  # density below which pressure decays
         relatedness_threshold = 0.5  # genome distance below which pressure is shared
         max_pressure = 1.0  # cap to prevent runaway
         mortality_strength = 0.08  # max mortality fraction at full pressure
@@ -1194,11 +1212,26 @@ class EcologyTier:
         growth_k = growth_k * (0.5 + pathogen_favorability)
         decay_rate = decay_rate + (1.0 - decay_rate) * 0.5 * (1.0 - pathogen_favorability)
 
+        # Precompute per-species suitability for climate-modulated baseline.
+        # In favorable climate, a species can sustain higher density before
+        # pathogens build up; in unfavorable climate, the threshold drops
+        # and pressure kicks in earlier.  This makes biotic pressure an
+        # amplifier of climate signal rather than a suppressor.
+        baseline_min = 10000.0
+        baseline_max = 30000.0
+        species_baselines: dict[str, float] = {}
+        for sp in species_list:
+            sid = sp["species_id"]
+            suit = self._compute_suitability_from_weather(genomes[sid], weather)
+            mean_suit = float(suit.mean())
+            species_baselines[sid] = baseline_min + (baseline_max - baseline_min) * mean_suit
+
         # Update pressure for each species
         for sp in species_list:
             sid = sp["species_id"]
             density = densities[sid]
             total_density = float(density.sum())
+            baseline_density = species_baselines[sid]
 
             current_pressure = pressures.get(sid, 0.0)
 
@@ -1222,9 +1255,10 @@ class EcologyTier:
                     # Closer relatives share more pressure
                     share_weight = 1.0 - (dist / relatedness_threshold)
                     other_density = float(densities[other_sid].sum())
-                    if other_density > baseline_density:
+                    other_baseline = species_baselines.get(other_sid, baseline_max)
+                    if other_density > other_baseline:
                         shared += share_weight * growth_k * 0.3 * (
-                            (other_density - baseline_density) / baseline_density
+                            (other_density - other_baseline) / other_baseline
                         )
             current_pressure += shared
 
