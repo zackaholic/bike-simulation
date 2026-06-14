@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from bike_sim.tiers.climate_hydrology import ClimateHydrologyTier
+from bike_sim.tiers.climate_hydrology import ClimateHydrologyTier, _distance_transform
 from bike_sim.tiers.ecology import EcologyTier
 from bike_sim.tiers.erosion import (
     ErosionParams,
@@ -93,7 +93,11 @@ class Orchestrator:
 
         self._advance_seasonal(num_seasons)
 
-        self._world.commit_version(trigger=f"advance {num_seasons} seasons")
+        # Only commit a version if _advance_seasonal didn't already snapshot
+        # at the final tick (avoids duplicate snapshots).
+        current_tick = self._world.tier_clocks["ecology"].tick_number
+        if self._snapshot_interval <= 0 or current_tick % self._snapshot_interval != 0:
+            self._world.commit_version(trigger=f"advance {num_seasons} seasons")
         return {
             "years_advanced": num_seasons * 0.25,
             "ecology_ticks": num_seasons,
@@ -170,6 +174,11 @@ class Orchestrator:
                 store.write_layer(
                     "climate_hydrology", "flow_accumulation", flow_acc.astype(np.float64), current_tick
                 )
+                # Update derived climate layers from live weather
+                combined = eroded_hm + sediment
+                self._write_derived_climate(
+                    combined, sediment, weather, flow_acc, current_tick
+                )
                 self._world.commit_version(trigger=f"snapshot at tick {current_tick}")
                 next_ver = self._world.current_version + 1
                 self._world.rasters.set_version(next_ver)
@@ -195,17 +204,21 @@ class Orchestrator:
                 flow_acc = self._compute_flow_accumulation(combined)
                 ticks_since_flow_recompute = 0
 
-        # Write final terrain state
-        tick_num = eco_clock.tick_number  # already advanced by eco.tick()
-        store.write_layer(
-            "climate_hydrology", "eroded_heightmap", eroded_hm.astype(np.float64), tick_num
-        )
-        store.write_layer(
-            "climate_hydrology", "sediment_depth", sediment.astype(np.float64), tick_num
-        )
-        store.write_layer(
-            "climate_hydrology", "flow_accumulation", flow_acc.astype(np.float64), tick_num
-        )
+        # Write final terrain state (only if we actually ran ticks)
+        if num_seasons > 0:
+            tick_num = eco_clock.tick_number
+            store.write_layer(
+                "climate_hydrology", "eroded_heightmap", eroded_hm.astype(np.float64), tick_num
+            )
+            store.write_layer(
+                "climate_hydrology", "sediment_depth", sediment.astype(np.float64), tick_num
+            )
+            store.write_layer(
+                "climate_hydrology", "flow_accumulation", flow_acc.astype(np.float64), tick_num
+            )
+            # Update derived climate layers from final weather state
+            combined = eroded_hm + sediment
+            self._write_derived_climate(combined, sediment, weather, flow_acc, tick_num)
 
     def _log_tick_summary(
         self, tick: int, year: float, season: int, weather: object
@@ -258,6 +271,88 @@ class Orchestrator:
             mean_drought = 0.0
 
         events.write_tick_weather(tick, year, season, mean_temp, mean_precip, mean_drought)
+
+    def _write_derived_climate(
+        self,
+        combined_surface: np.ndarray,
+        sediment: np.ndarray,
+        weather: object,
+        flow_acc: np.ndarray,
+        tick_number: int,
+    ) -> None:
+        """Recompute and write climate-derived layers from live weather.
+
+        Updates temperature, precipitation, soil_moisture, frost_days, GDD,
+        solar_insolation, and distance_to_water so that snapshots reflect
+        the current climate state rather than creation-time values.
+        """
+        store = self._world.rasters
+
+        # Write the live weather fields directly
+        store.write_layer(
+            "climate_hydrology", "temperature",
+            weather.temperature.astype(np.float64), tick_number
+        )
+        store.write_layer(
+            "climate_hydrology", "precipitation",
+            weather.precipitation.astype(np.float64), tick_number
+        )
+
+        # Soil moisture — same formula as ClimateHydrologyTier._compute_derived_cache
+        base_moisture = np.clip(weather.precipitation / 2000.0, 0, 1)
+        elev_norm = combined_surface / (combined_surface.max() + 1e-10)
+        base_moisture += (1 - elev_norm) * 0.2
+        sediment_bonus = np.minimum(sediment / 5.0, 0.15)
+        base_moisture += sediment_bonus
+        base_moisture = np.clip(base_moisture, 0, 1)
+
+        summer = np.clip(base_moisture * 0.7, 0, 1)
+        winter = np.clip(base_moisture * 1.0, 0, 1)
+        winter = np.maximum(winter, summer)
+        store.write_layer(
+            "climate_hydrology", "soil_moisture_summer",
+            summer.astype(np.float64), tick_number
+        )
+        store.write_layer(
+            "climate_hydrology", "soil_moisture_winter",
+            winter.astype(np.float64), tick_number
+        )
+
+        # Frost days
+        frost_days = np.clip(365.0 * (1.0 - weather.temperature / 20.0), 0, 365)
+        store.write_layer(
+            "climate_hydrology", "frost_days",
+            frost_days.astype(np.float64), tick_number
+        )
+
+        # Growing degree days
+        gdd = np.clip((weather.temperature - 5.0) * 365.0 * 0.5, 0, None)
+        store.write_layer(
+            "climate_hydrology", "growing_degree_days",
+            gdd.astype(np.float64), tick_number
+        )
+
+        # Solar insolation (terrain-dependent, not weather-dependent, but
+        # terrain changes via erosion so recompute)
+        cell_size = 50.0
+        dy, dx = np.gradient(combined_surface, cell_size)
+        slope_angle = np.arctan(np.sqrt(dx**2 + dy**2))
+        aspect = np.arctan2(-dx, dy)
+        insolation = np.cos(slope_angle) * (0.5 + 0.5 * np.cos(aspect - np.pi))
+        insolation = np.clip(insolation, 0, 1)
+        store.write_layer(
+            "climate_hydrology", "solar_insolation",
+            insolation.astype(np.float64), tick_number
+        )
+
+        # Distance to water
+        water_threshold = np.percentile(flow_acc, 99.5)
+        is_water = flow_acc >= water_threshold
+        distance_to_water = _distance_transform(is_water, cell_size)
+        store.write_layer(
+            "climate_hydrology", "distance_to_water",
+            distance_to_water.astype(np.float64), tick_number
+        )
 
     def _compute_flow_accumulation(self, heightmap: np.ndarray) -> np.ndarray:
         """D8 flow accumulation — reuses ClimateHydrologyTier's implementation."""
