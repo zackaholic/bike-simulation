@@ -348,6 +348,7 @@ class EcologyTier:
         # Speciation check every 200 ticks (50 years)
         if tick_num > 0 and tick_num % 200 == 0:
             self._check_speciation(tick_num, weather)
+            self._check_reabsorption(tick_num, weather)
 
         clock.tick_number += 1
         clock.simulated_year += self.YEARS_PER_TICK
@@ -1500,5 +1501,177 @@ class EcologyTier:
             store.write_layer(TIER, layer_name, density.astype(np.float64), tick_number)
 
         # Persist inherited pressure for any new daughter species.
+        if pressures_changed:
+            self._world.events.set_biotic_pressures(pressures)
+
+    # ── gene flow / reabsorption ─────────────────────────────────
+
+    def _check_reabsorption(self, tick_number: int, weather: SeasonalWeather | None = None) -> None:
+        """Merge closely-related species that overlap without a barrier.
+
+        This is the inverse of speciation: when geographic isolation dissolves
+        and two similar species come back into contact, the smaller population
+        is absorbed into the larger one with gene flow.
+        """
+        store = self._world.rasters
+        current_year = self._world.tier_clocks[TIER].simulated_year
+        species_list = self._world.events.list_species(alive_at_year=current_year)
+
+        if len(species_list) < 2:
+            return
+
+        max_reabsorption_distance = 0.25  # must be below niche_width (0.3)
+        min_overlap_fraction = 0.2  # 20% of smaller species' range must overlap
+        min_species_age = 100.0  # years — prevent immediate reabsorption after speciation
+
+        # Load genomes and densities for all living species.
+        species_data: list[dict] = []
+        for sp in species_list:
+            sid = sp["species_id"]
+            species_age = current_year - sp.get("appeared_year", 0.0)
+            if species_age < min_species_age:
+                continue
+            layer_name = f"species_{sid}_density"
+            if layer_name not in store.list_layers(TIER):
+                continue
+            density = store.read_layer(TIER, layer_name)
+            total = float(density.sum())
+            if total < 1.0:
+                continue
+            genome = self._world.events.get_species(sid)["genome"]
+            species_data.append({
+                "species_id": sid,
+                "genome": genome,
+                "density": density,
+                "total": total,
+                "occupied": density > 0.1,
+            })
+
+        if len(species_data) < 2:
+            return
+
+        # Pre-compute suitability for barrier checks (same logic as speciation).
+        hospitable_coarse = None
+        ds = 10
+        if weather is not None:
+            # We need hospitable terrain per-pair, but a general hospitable map
+            # (using mean suitability of both species) is a reasonable proxy.
+            # Use a fixed moderate genome for the hospitable check.
+            suit_full = np.clip(weather.precipitation / 2000.0, 0, 1)  # moisture proxy
+            cr, cc = suit_full.shape[0] // ds, suit_full.shape[1] // ds
+            # Use actual suitability: a cell is hospitable if either species
+            # could survive there.  We'll compute per-pair below.
+
+        # Find candidate pairs (sorted by genome distance, closest first).
+        absorbed: set[str] = set()  # track already-absorbed species this tick
+        pressures = self._world.events.get_biotic_pressures()
+        pressures_changed = False
+
+        for i in range(len(species_data)):
+            if species_data[i]["species_id"] in absorbed:
+                continue
+            for j in range(i + 1, len(species_data)):
+                if species_data[j]["species_id"] in absorbed:
+                    continue
+
+                sp_a = species_data[i]
+                sp_b = species_data[j]
+                dist = self._genome_distance(sp_a["genome"], sp_b["genome"])
+
+                if dist >= max_reabsorption_distance:
+                    continue
+
+                # Determine which is larger (absorber) and smaller (absorbed).
+                if sp_a["total"] >= sp_b["total"]:
+                    absorber, absorbed_sp = sp_a, sp_b
+                else:
+                    absorber, absorbed_sp = sp_b, sp_a
+
+                # Check spatial overlap: fraction of smaller species' range
+                # that overlaps with the larger.
+                overlap = np.logical_and(absorber["occupied"], absorbed_sp["occupied"])
+                absorbed_cells = int(absorbed_sp["occupied"].sum())
+                if absorbed_cells == 0:
+                    continue
+                overlap_fraction = float(overlap.sum()) / absorbed_cells
+                if overlap_fraction < min_overlap_fraction:
+                    continue
+
+                # Barrier check: can the two populations reach each other
+                # through hospitable terrain?  If a barrier separates them,
+                # they stay distinct (geographic isolation persists).
+                if weather is not None:
+                    # Compute suitability for the absorber species on coarse grid.
+                    suit_full = self._compute_suitability_from_weather(
+                        absorber["genome"], weather
+                    )
+                    cr, cc = suit_full.shape[0] // ds, suit_full.shape[1] // ds
+                    suit_coarse = (
+                        suit_full[: cr * ds, : cc * ds]
+                        .reshape(cr, ds, cc, ds)
+                        .mean(axis=(1, 3))
+                    )
+                    hospitable_coarse = suit_coarse > 0.2
+
+                    # Treat absorber's range as "main" and absorbed's as "fragment".
+                    absorber_coarse = absorber["occupied"][::ds, ::ds][:cr, :cc]
+                    absorbed_coarse = absorbed_sp["occupied"][::ds, ::ds][:cr, :cc]
+
+                    if not _fragments_connect_through_hospitable(
+                        absorbed_coarse, absorber_coarse, hospitable_coarse
+                    ):
+                        continue  # barrier still separates them
+
+                # ── Perform reabsorption ──
+                absorber_sid = absorber["species_id"]
+                absorbed_sid = absorbed_sp["species_id"]
+
+                # Gene flow: shift absorber genome toward absorbed, weighted
+                # by population ratio.  Small absorbed population = small shift.
+                pop_ratio = absorbed_sp["total"] / (absorber["total"] + absorbed_sp["total"])
+                gene_flow_weight = pop_ratio * 0.5  # dampen to prevent large jumps
+                updated_genome = {}
+                for key, val in absorber["genome"].items():
+                    absorbed_val = absorbed_sp["genome"].get(key, val)
+                    if key in ("growth_form", "mast_interval"):
+                        # Discrete traits: keep absorber's value
+                        updated_genome[key] = val
+                    else:
+                        # Continuous traits: weighted average
+                        updated_genome[key] = val + (absorbed_val - val) * gene_flow_weight
+                self._world.events.update_species_genome(absorber_sid, updated_genome)
+
+                # Merge densities: add absorbed density to absorber.
+                absorber_layer = f"species_{absorber_sid}_density"
+                absorbed_layer = f"species_{absorbed_sid}_density"
+                absorber_density = store.read_layer(TIER, absorber_layer).copy()
+                absorbed_density = store.read_layer(TIER, absorbed_layer).copy()
+                merged_density = absorber_density + absorbed_density
+                store.write_layer(TIER, absorber_layer, merged_density.astype(np.float64), tick_number)
+
+                # Zero out absorbed species' density and seed bank.
+                store.write_layer(TIER, absorbed_layer, np.zeros_like(absorbed_density), tick_number)
+                sb_layer = f"seed_bank_{absorbed_sid}"
+                if sb_layer in store.list_layers(TIER):
+                    store.write_layer(TIER, sb_layer, np.zeros_like(absorbed_density), tick_number)
+
+                # Merge biotic pressure (weighted average).
+                p_absorber = pressures.get(absorber_sid, 0.0)
+                p_absorbed = pressures.get(absorbed_sid, 0.0)
+                pressures[absorber_sid] = p_absorber + (p_absorbed - p_absorber) * pop_ratio
+                if absorbed_sid in pressures:
+                    del pressures[absorbed_sid]
+                pressures_changed = True
+
+                # Mark absorbed species extinct.
+                self._world.events.mark_species_extinct(absorbed_sid, current_year)
+                absorbed.add(absorbed_sid)
+
+                # Update absorber's cached data for subsequent pair checks.
+                absorber["density"] = merged_density
+                absorber["total"] = float(merged_density.sum())
+                absorber["occupied"] = merged_density > 0.1
+                absorber["genome"] = updated_genome
+
         if pressures_changed:
             self._world.events.set_biotic_pressures(pressures)

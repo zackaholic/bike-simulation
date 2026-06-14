@@ -595,9 +595,27 @@ The fractal noise ensures these barrier-creating events are aperiodic and unique
 
 Compare v5 (no barrier check): 89 species at year 1050, 67 herbs, accelerating speciation, 508 species after 24 hours of compute with no sign of stabilizing.
 
-### Future direction: gene flow / species reabsorption
+### Gene flow / species reabsorption (implemented 2026-06-14)
 
-Discussed but not yet implemented: when a barrier dissolves and two populations reconnect, species with similar enough genomes (below a merge threshold) could be reabsorbed into one population. The merged species would gain a slight adaptation from the isolate (adaptive introgression). This would:
-- Make speciation a two-way door: briefly isolated populations merge back, adding resilience
-- Only populations isolated long enough to diverge past the merge threshold become permanent species
-- Create a cycle: isolate → diverge slightly → merge back with added adaptation → expand range → new isolation opportunity
+**Decision**: When two closely-related species overlap spatially and no barrier separates them, the smaller population is absorbed into the larger one with gene flow. This is the inverse of speciation.
+
+**Why**: The v7 calibration (4000yr) showed zero extinctions and 8 frozen herb species — "zombie pairs" that were functionally identical but grinding through competitive exclusion indefinitely. Lotka-Volterra competitive exclusion takes 50-100 years for near-identical species, which is too slow when climate shifts, disturbance, and LDD keep resetting the contest. Without reabsorption, species accumulate monotonically.
+
+**Mechanism**:
+- Checked every 200 ticks (50 years), same cadence as speciation, run immediately after
+- **Trigger conditions** (all must be true):
+  - Genome distance < 0.25 (below niche_width of 0.3, strong competition)
+  - Spatial overlap > 20% of the smaller species' range
+  - No barrier separating them (BFS through hospitable terrain, same check as speciation)
+  - Both species at least 100 years old (prevents immediate post-speciation reabsorption)
+- **Merge mechanics**:
+  - Smaller population absorbed into larger
+  - Densities added together in all cells
+  - Absorber's genome shifts toward absorbed species, weighted by population ratio × 0.5 (gene flow / adaptive introgression)
+  - Biotic pressure merged as weighted average
+  - Absorbed species marked extinct, density and seed bank zeroed
+- **Emergent properties**:
+  - Fires more often for herbs (light seeds bridge barriers via LDD → overlap → reabsorption)
+  - Fires less for trees (heavy seeds stay isolated → barriers persist → genuine speciation)
+  - Makes speciation a two-way door: briefly isolated populations merge back with slight adaptation
+  - Only populations that diverge past 0.25 genome distance become permanent species

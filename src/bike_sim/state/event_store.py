@@ -97,6 +97,14 @@ class EventStore:
         )
         self._conn.commit()
 
+    def update_species_genome(self, species_id: str, genome: dict) -> None:
+        """Update the genome of an existing species (gene flow)."""
+        self._conn.execute(
+            "UPDATE species SET genome_json = ? WHERE species_id = ?",
+            (json.dumps(genome), species_id),
+        )
+        self._conn.commit()
+
     def list_species(self, alive_at_year: float | None = None) -> list[dict]:
         """Return all species as dicts with at least a 'species_id' key.
 
