@@ -18,15 +18,9 @@ import shutil
 import numpy as np
 import pytest
 
-from bike_sim.tiers.climate_hydrology import ClimateHydrologyTier
 from bike_sim.tiers.ecology import EcologyTier, TIER
-from bike_sim.tiers.erosion import ErosionParams
-from bike_sim.tiers.geology import GeologyTier
 from bike_sim.weather import SeasonalWeather, WeatherSystem
 from bike_sim.world import World
-
-# Fast erosion for test speed.
-FAST_EROSION = ErosionParams(num_particles=100, max_lifetime=30)
 
 GRID_SIZE = 1000
 CARRYING_CAPACITY = 15.0
@@ -65,6 +59,10 @@ def make_weather_system(world: World) -> WeatherSystem:
 
 def _create_eco_world(path) -> World:
     """Create a world with geology + climate-hydrology ticked."""
+    from bike_sim.tiers.climate_hydrology import ClimateHydrologyTier
+    from bike_sim.tiers.erosion import ErosionParams
+    from bike_sim.tiers.geology import GeologyTier
+    FAST_EROSION = ErosionParams(num_particles=100, max_lifetime=30)
     w = World.create(path, seed=42)
     GeologyTier(w).tick()
     ClimateHydrologyTier(w, erosion_params=FAST_EROSION).tick()
@@ -124,21 +122,15 @@ def _species_seed_banks(world: World) -> dict[str, np.ndarray]:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="module")
-def base_world(tmp_path_factory):
-    """World with geology + climate ticked (terrain ready for ecology).
-
-    Module-scoped because geology + climate are expensive and read-only
-    for ecology tests.
-    """
-    path = tmp_path_factory.mktemp("seasonal_eco")
-    return _create_eco_world(path / "world")
-
-
 @pytest.fixture
-def eco_world(tmp_path):
-    """Fresh world for ecology tests that mutate state."""
-    return _create_eco_world(tmp_path / "eco_world")
+def eco_world(fresh_world):
+    """Fresh world for ecology tests that mutate state.
+
+    Uses the session-scoped base world (geology+climate already ticked)
+    copied to a temp dir, so each test gets a clean copy without paying
+    the geology/climate cost.
+    """
+    return fresh_world
 
 
 # ===========================================================================
@@ -677,6 +669,7 @@ class TestIntegration:
             assert arr.shape == (GRID_SIZE, GRID_SIZE)
             assert arr.dtype == np.float64
 
+    @pytest.mark.slow
     def test_multi_year_determinism(self, tmp_path):
         """Run 8 seasonal ticks with same seed twice; results are bit-identical."""
         results = []
@@ -712,6 +705,7 @@ class TestIntegration:
                 err_msg=f"Density for {sid} differs between identical runs",
             )
 
+    @pytest.mark.slow
     def test_multi_year_determinism_with_weather_system(self, tmp_path):
         """Same seed + WeatherSystem produces identical results."""
         results = []

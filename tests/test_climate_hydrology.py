@@ -9,7 +9,7 @@ from bike_sim.tiers.geology import GeologyTier
 from bike_sim.world import TierId, World
 
 # Reduced erosion params for fast tests.
-FAST_PARAMS = ErosionParams(num_particles=1_000, max_lifetime=30)
+FAST_PARAMS = ErosionParams(num_particles=100, max_lifetime=30)
 
 # All layers the climate-hydrology tier must produce.
 EXPECTED_LAYERS = [

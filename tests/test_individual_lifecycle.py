@@ -12,15 +12,9 @@ import numpy as np
 import pytest
 
 from bike_sim.state.event_store import EventStore
-from bike_sim.tiers.climate_hydrology import ClimateHydrologyTier
 from bike_sim.tiers.ecology import EcologyTier, TIER
-from bike_sim.tiers.erosion import ErosionParams
-from bike_sim.tiers.geology import GeologyTier
 from bike_sim.weather import SeasonalWeather
 from bike_sim.world import World
-
-# Fast erosion for test speed.
-FAST_EROSION = ErosionParams(num_particles=100, max_lifetime=30)
 
 GRID_SIZE = 1000
 
@@ -58,12 +52,12 @@ def store(tmp_path):
 
 
 @pytest.fixture
-def eco_world(tmp_path):
-    """Create a world with geology + climate-hydrology ticked (ready for ecology)."""
-    w = World.create(tmp_path / "world", seed=42)
-    GeologyTier(w).tick()
-    ClimateHydrologyTier(w, erosion_params=FAST_EROSION).tick()
-    return w
+def eco_world(fresh_world):
+    """World with geology + climate-hydrology ticked (ready for ecology).
+
+    Uses the session-scoped base world copied per-test.
+    """
+    return fresh_world
 
 
 # ===========================================================================
@@ -124,6 +118,7 @@ class TestEventStoreStateManagement:
 # ===========================================================================
 
 
+@pytest.mark.slow
 class TestAgeBasedDeath:
     """Tests that individuals die based on their species' lifespan."""
 
@@ -247,6 +242,7 @@ class TestAgeBasedDeath:
 # ===========================================================================
 
 
+@pytest.mark.slow
 class TestPostMortemTransitions:
     """Tests for snag -> log -> mound transitions over time."""
 

@@ -7,23 +7,23 @@ from bike_sim.orchestrator import Orchestrator
 from bike_sim.tiers.erosion import ErosionParams
 from bike_sim.world import World
 
-FAST_PARAMS = ErosionParams(num_particles=1_000, max_lifetime=30)
+from bike_sim.tiers.erosion import ErosionParams
+
+FAST_EROSION = ErosionParams(num_particles=100, max_lifetime=30)
 
 
 @pytest.fixture
 def orch(tmp_path):
     """Create a fresh world with an Orchestrator, nothing ticked yet."""
     world = World.create(tmp_path / "world", seed=42)
-    return Orchestrator(world, erosion_params=FAST_PARAMS)
+    return Orchestrator(world, erosion_params=FAST_EROSION)
 
 
 @pytest.fixture
-def ready_world(tmp_path):
-    """Create a world and run create_world() so geology+climate are ready."""
-    world = World.create(tmp_path / "world", seed=42)
-    orch = Orchestrator(world, erosion_params=FAST_PARAMS)
-    orch.create_world()
-    return world, orch
+def ready_world(fresh_world):
+    """World with geology+climate ready, using the session-scoped base."""
+    orch = Orchestrator(fresh_world, erosion_params=FAST_EROSION)
+    return fresh_world, orch
 
 
 # ── Core orchestration ────────────────────────────────────────────────
@@ -57,18 +57,19 @@ def test_advance_5_years(ready_world):
     assert world.tier_clocks["ecology"].tick_number == 20
 
 
+@pytest.mark.slow
 def test_advance_small_increments(tmp_path):
     """Five advance(1) calls should produce the same state as one advance(5)."""
     # World A: incremental advances.
     world_a = World.create(tmp_path / "world_a", seed=42)
-    orch_a = Orchestrator(world_a, erosion_params=FAST_PARAMS)
+    orch_a = Orchestrator(world_a, erosion_params=FAST_EROSION)
     orch_a.create_world()
     for _ in range(5):
         orch_a.advance(1)
 
     # World B: single large advance.
     world_b = World.create(tmp_path / "world_b", seed=42)
-    orch_b = Orchestrator(world_b, erosion_params=FAST_PARAMS)
+    orch_b = Orchestrator(world_b, erosion_params=FAST_EROSION)
     orch_b.create_world()
     orch_b.advance(5)
 
@@ -102,6 +103,7 @@ def test_advance_ride(ready_world):
     assert result["years_advanced"] == pytest.approx(5.0)
 
 
+@pytest.mark.slow
 def test_advance_ride_capped(ready_world):
     """advance_ride(200) should cap at MAX_SEASONS_PER_RIDE (120 seasons = 30 years)."""
     _world, orch = ready_world
@@ -114,12 +116,13 @@ def test_advance_ride_capped(ready_world):
 # ── Reproducibility ──────────────────────────────────────────────────
 
 
+@pytest.mark.slow
 def test_advance_deterministic(tmp_path):
     """Two worlds with the same seed should produce identical ecology layers."""
     worlds = []
     for name in ("world_a", "world_b"):
         world = World.create(tmp_path / name, seed=42)
-        orch = Orchestrator(world, erosion_params=FAST_PARAMS)
+        orch = Orchestrator(world, erosion_params=FAST_EROSION)
         orch.create_world()
         orch.advance(5)
         worlds.append(world)
@@ -134,16 +137,17 @@ def test_advance_deterministic(tmp_path):
         np.testing.assert_array_equal(arr_a, arr_b)
 
 
+@pytest.mark.slow
 def test_advance_deterministic_incremental(tmp_path):
     """advance(2.5) twice vs advance(5) once should yield the same final state."""
     world_a = World.create(tmp_path / "world_a", seed=42)
-    orch_a = Orchestrator(world_a, erosion_params=FAST_PARAMS)
+    orch_a = Orchestrator(world_a, erosion_params=FAST_EROSION)
     orch_a.create_world()
     orch_a.advance(2.5)
     orch_a.advance(2.5)
 
     world_b = World.create(tmp_path / "world_b", seed=42)
-    orch_b = Orchestrator(world_b, erosion_params=FAST_PARAMS)
+    orch_b = Orchestrator(world_b, erosion_params=FAST_EROSION)
     orch_b.create_world()
     orch_b.advance(5)
 
@@ -191,11 +195,12 @@ def test_status_returns_info(ready_world):
 # ── State persistence ────────────────────────────────────────────────
 
 
+@pytest.mark.slow
 def test_world_persists_after_advance(tmp_path):
     """Save, close, and reopen — simulated years should be preserved."""
     path = tmp_path / "world"
     world = World.create(path, seed=42)
-    orch = Orchestrator(world, erosion_params=FAST_PARAMS)
+    orch = Orchestrator(world, erosion_params=FAST_EROSION)
     orch.create_world()
     orch.advance(5)
 
@@ -211,11 +216,12 @@ def test_world_persists_after_advance(tmp_path):
     world2.close()
 
 
+@pytest.mark.slow
 def test_advance_after_reopen(tmp_path):
     """Advance, save, close, reopen, advance again — should not crash."""
     path = tmp_path / "world"
     world = World.create(path, seed=42)
-    orch = Orchestrator(world, erosion_params=FAST_PARAMS)
+    orch = Orchestrator(world, erosion_params=FAST_EROSION)
     orch.create_world()
     orch.advance(5)
     eco_ticks_before = world.tier_clocks["ecology"].tick_number
@@ -224,7 +230,7 @@ def test_advance_after_reopen(tmp_path):
     world.close()
 
     world2 = World.open(path)
-    orch2 = Orchestrator(world2, erosion_params=FAST_PARAMS)
+    orch2 = Orchestrator(world2, erosion_params=FAST_EROSION)
     result = orch2.advance(5)
 
     assert result["ecology_ticks"] == 20

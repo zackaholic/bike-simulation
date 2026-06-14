@@ -10,12 +10,13 @@ import pytest
 
 from bike_sim.tiers.climate_hydrology import ClimateHydrologyTier
 from bike_sim.tiers.ecology import EcologyTier
-from bike_sim.tiers.erosion import ErosionParams
 from bike_sim.tiers.geology import GeologyTier
 from bike_sim.weather import SeasonalWeather, WeatherSystem
 from bike_sim.world import World
 
-FAST_PARAMS = ErosionParams(num_particles=1_000, max_lifetime=30)
+from bike_sim.tiers.erosion import ErosionParams
+
+FAST_EROSION = ErosionParams(num_particles=100, max_lifetime=30)
 
 # The full set of expected genome traits after expansion.
 FUNCTIONAL_TRAITS = {
@@ -79,7 +80,7 @@ def eco_world(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("genome")
     w = World.create(tmp / "world", seed=42)
     GeologyTier(w).tick()
-    ClimateHydrologyTier(w, erosion_params=FAST_PARAMS).tick()
+    ClimateHydrologyTier(w, erosion_params=FAST_EROSION).tick()
     heightmap = w.rasters.read_layer("geology", "heightmap")
     ws = WeatherSystem(w.seed, heightmap)
     eco = EcologyTier(w)
@@ -115,7 +116,7 @@ def multi_tick_world(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("genome_multi")
     w = World.create(tmp / "world", seed=42)
     GeologyTier(w).tick()
-    ClimateHydrologyTier(w, erosion_params=FAST_PARAMS).tick()
+    ClimateHydrologyTier(w, erosion_params=FAST_EROSION).tick()
     heightmap = w.rasters.read_layer("geology", "heightmap")
     ws = WeatherSystem(w.seed, heightmap)
     eco = EcologyTier(w)
@@ -356,6 +357,7 @@ class TestAncestorTraitValues:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestSpeciationDrift:
     def test_speciated_species_have_17_traits(self, multi_tick_world):
         """Any species produced by speciation must have all 17 traits."""
@@ -443,7 +445,7 @@ class TestDeterminism:
         for i in range(2):
             w = World.create(tmp_path / f"det_{i}", seed=42)
             GeologyTier(w).tick()
-            ClimateHydrologyTier(w, erosion_params=FAST_PARAMS).tick()
+            ClimateHydrologyTier(w, erosion_params=FAST_EROSION).tick()
             heightmap = w.rasters.read_layer("geology", "heightmap")
             ws = WeatherSystem(w.seed, heightmap)
             EcologyTier(w).tick(ws.generate(0.0, 1))
@@ -468,7 +470,7 @@ class TestDeterminism:
         for seed in (42, 99):
             w = World.create(tmp_path / f"seed_{seed}", seed=seed)
             GeologyTier(w).tick()
-            ClimateHydrologyTier(w, erosion_params=FAST_PARAMS).tick()
+            ClimateHydrologyTier(w, erosion_params=FAST_EROSION).tick()
             heightmap = w.rasters.read_layer("geology", "heightmap")
             ws = WeatherSystem(w.seed, heightmap)
             EcologyTier(w).tick(ws.generate(0.0, 1))

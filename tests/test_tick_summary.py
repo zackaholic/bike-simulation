@@ -11,10 +11,11 @@ import pytest
 
 from bike_sim.orchestrator import Orchestrator
 from bike_sim.state.event_store import EventStore
-from bike_sim.tiers.erosion import ErosionParams
 from bike_sim.world import World
 
-FAST_PARAMS = ErosionParams(num_particles=1_000, max_lifetime=30)
+from bike_sim.tiers.erosion import ErosionParams
+
+FAST_EROSION = ErosionParams(num_particles=100, max_lifetime=30)
 
 
 # ── EventStore unit tests ───────────────────────────────────────────────
@@ -126,12 +127,10 @@ class TestEventStoreSummary:
 
 
 @pytest.fixture
-def ready_world(tmp_path):
-    """Create a world with geology+climate ready, using fast erosion params."""
-    world = World.create(tmp_path / "world", seed=42)
-    orch = Orchestrator(world, erosion_params=FAST_PARAMS)
-    orch.create_world()
-    return world, orch
+def ready_world(fresh_world):
+    """World with geology+climate ready, using the session-scoped base."""
+    orch = Orchestrator(fresh_world, erosion_params=FAST_EROSION)
+    return fresh_world, orch
 
 
 def test_advance_produces_tick_summaries(ready_world):
@@ -156,7 +155,7 @@ def test_advance_produces_tick_summaries(ready_world):
 def test_summary_interval_respected(tmp_path):
     """Custom summary_interval=2 should log every 2 ticks."""
     world = World.create(tmp_path / "world", seed=42)
-    orch = Orchestrator(world, erosion_params=FAST_PARAMS, summary_interval=2)
+    orch = Orchestrator(world, erosion_params=FAST_EROSION, summary_interval=2)
     orch.create_world()
     orch.advance_seasons(8)
 
@@ -171,7 +170,7 @@ def test_summary_interval_respected(tmp_path):
 def test_summary_interval_zero_disables(tmp_path):
     """summary_interval=0 should produce no summaries."""
     world = World.create(tmp_path / "world", seed=42)
-    orch = Orchestrator(world, erosion_params=FAST_PARAMS, summary_interval=0)
+    orch = Orchestrator(world, erosion_params=FAST_EROSION, summary_interval=0)
     orch.create_world()
     orch.advance_seasons(8)
 
@@ -193,12 +192,13 @@ def test_summaries_have_species_data(ready_world):
         assert isinstance(s["species_id"], str)
 
 
+@pytest.mark.slow
 def test_snapshot_interval_creates_versions(tmp_path):
     """snapshot_interval=8 over 20 ticks should create intermediate versions."""
     world = World.create(tmp_path / "world", seed=42)
     orch = Orchestrator(
         world,
-        erosion_params=FAST_PARAMS,
+        erosion_params=FAST_EROSION,
         snapshot_interval=8,
     )
     orch.create_world()

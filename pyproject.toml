@@ -39,3 +39,6 @@ select = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow (skipped by default, use --run-slow to include)",
+]
