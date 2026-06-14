@@ -496,13 +496,13 @@ class EcologyTier:
         # Normalize precipitation to [0, 1] range
         precip_norm = np.clip(weather.precipitation / 2000.0, 0, 1)
         drought_stress = 1.0 - precip_norm
-        suit *= _gaussian_match(drought_stress, genome["drought_tolerance"], sigma=0.14)
+        suit *= _gaussian_match(drought_stress, genome["drought_tolerance"], sigma=0.17)
 
         # Temperature suitability
         # Normalize temperature to a preference scale
         temp_norm = np.clip((weather.temperature - (-10)) / 30.0, 0, 1)  # -10C to 20C range
         warmth_preference = 1.0 - genome["frost_tolerance"]
-        suit *= _gaussian_match(temp_norm, warmth_preference, sigma=0.14)
+        suit *= _gaussian_match(temp_norm, warmth_preference, sigma=0.17)
 
         # Light competition via canopy shading (max_height becomes load-bearing)
         if canopy_shade is not None:
@@ -1217,8 +1217,8 @@ class EcologyTier:
         # pathogens build up; in unfavorable climate, the threshold drops
         # and pressure kicks in earlier.  This makes biotic pressure an
         # amplifier of climate signal rather than a suppressor.
-        baseline_min = 10000.0
-        baseline_max = 30000.0
+        baseline_min = 5000.0
+        baseline_max = 20000.0
         species_baselines: dict[str, float] = {}
         for sp in species_list:
             sid = sp["species_id"]
