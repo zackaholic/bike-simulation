@@ -278,6 +278,7 @@
   var sidebarContent = document.getElementById("sidebar-content");
   var mapEl = document.getElementById("map");
   var clickMarker = null;
+  var selectedPoint = null;  // {latlng, meters: {x, y}} — persists across version changes
 
   function openSidebar(html) {
     sidebarContent.innerHTML = html;
@@ -291,6 +292,7 @@
     mapEl.classList.remove("sidebar-open");
     map.invalidateSize();
     if (clickMarker) { map.removeLayer(clickMarker); clickMarker = null; }
+    selectedPoint = null;
   }
 
   document.getElementById("sidebar-close").addEventListener("click", closeSidebar);
@@ -366,14 +368,25 @@
   // Click handler: convert map coords to meters for the API.
   map.on("click", function (e) {
     var m = mapToMeters(e.latlng);
+    selectPoint(e.latlng, m);
+  });
+
+  function selectPoint(latlng, meters) {
+    selectedPoint = { latlng: latlng, meters: meters };
 
     if (clickMarker) { map.removeLayer(clickMarker); }
-    clickMarker = L.circleMarker(e.latlng, { radius: 6, color: "#ff3333", weight: 2 }).addTo(map);
+    clickMarker = L.circleMarker(latlng, { radius: 6, color: "#ff3333", weight: 2 }).addTo(map);
 
-    fetch("/api/world/" + version + "/point?x=" + m.x + "&y=" + m.y)
+    fetch("/api/world/" + version + "/point?x=" + meters.x + "&y=" + meters.y)
       .then(function (r) { return r.json(); })
       .then(function (data) { openSidebar(renderPointData(data)); });
-  });
+  }
+
+  function refreshSelectedPoint() {
+    if (selectedPoint) {
+      selectPoint(selectedPoint.latlng, selectedPoint.meters);
+    }
+  }
 
   // ── Individual markers ─────────────────────────────────────
 
@@ -717,9 +730,9 @@
     var h = parseHash();
     h.version = version;
     updateHash(h);
-    closeSidebar();
     buildLayers();
     loadIndividuals();
+    refreshSelectedPoint();
   });
 
   window.addEventListener("hashchange", function () {
@@ -729,9 +742,9 @@
       if (newVersion !== version) {
         version = newVersion;
         versionSelect.value = version;
-        closeSidebar();
         buildLayers();
         loadIndividuals();
+        refreshSelectedPoint();
       }
     }
   });
