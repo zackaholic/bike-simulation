@@ -11,7 +11,7 @@
 <style>
   html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
   #map { position: absolute; top: 0; left: 0; right: 0; bottom: 0; }
-  #map.sidebar-open { right: 340px; }
+  #map.sidebar-open { right: 420px; }
   #toolbar {
     position: absolute; top: 10px; left: 60px; z-index: 1000;
     background: white; padding: 6px 12px; border-radius: 4px;
@@ -73,7 +73,7 @@
   .lp-persistent label { cursor: pointer; color: #333; }
   .lp-persistent input[type="checkbox"] { margin-right: 6px; }
   #sidebar {
-    position: absolute; top: 0; right: 0; width: 340px; height: 100%;
+    position: absolute; top: 0; right: 0; width: 420px; height: 100%;
     background: #fafafa; border-left: 1px solid #ccc;
     overflow-y: auto; font: 13px/1.5 sans-serif; padding: 12px;
     box-sizing: border-box; display: none; z-index: 1001;
@@ -85,7 +85,7 @@
   #sidebar .close-btn:hover { color: #333; }
   #sidebar table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
   #sidebar td { padding: 2px 6px; border-bottom: 1px solid #eee; }
-  #sidebar td:first-child { font-weight: 600; color: #555; white-space: nowrap; }
+  #sidebar td:first-child { font-weight: 600; color: #555; white-space: nowrap; max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
   #sidebar td:last-child { text-align: right; }
   #sidebar .empty { color: #999; font-style: italic; }
   #legend {
