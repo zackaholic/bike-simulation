@@ -619,3 +619,23 @@ Compare v5 (no barrier check): 89 species at year 1050, 67 herbs, accelerating s
   - Fires less for trees (heavy seeds stay isolated → barriers persist → genuine speciation)
   - Makes speciation a two-way door: briefly isolated populations merge back with slight adaptation
   - Only populations that diverge past 0.25 genome distance become permanent species
+
+### Climate-ecology coupling audit and fixes (2026-06-14)
+
+**Decision**: Strengthen climate→ecology signal by fixing three independent damping points identified by a deep audit of the v7 calibration data.
+
+**Why**: An audit of the 4000-year v7 calibration revealed that the climate system was essentially decorative. All species converged to ~20,000 total density (coefficient of variation <4%) regardless of climate conditions. Five independent damping points each suppressed the climate signal. Three were fixable without adding new mechanics.
+
+**Fixes applied**:
+
+1. **Fixed drought stress self-cancelling baseline (R4)**: Drought deficit was computed as `1 - precip / precip.mean()`, but since the fractal multiplier shifts all cells equally, the mean IS the shifted value — deficit was always ~zero. Fixed by using the base climate precipitation from world creation (the terrain-modulated envelope without weather anomalies) as the reference.
+
+2. **Climate-modulated biotic pressure baseline (R1)**: The fixed `baseline_density = 20000` acted as a thermostat pinning every species at the same density regardless of climate. Replaced with a per-species baseline that scales with mean suitability under current weather: `baseline = 10000 + 20000 * mean_suitability`. In favorable climate, species can grow larger before pathogens build up; in unfavorable climate, pathogens kick in earlier. This makes biotic pressure amplify climate signal rather than override it.
+
+3. **Narrowed suitability Gaussian sigma (R3)**: Reduced σ from 0.2 to 0.14 for drought and temperature match functions. At σ=0.2, a century-scale climate swing (4.5°C) only dropped suitability by ~25% — too gentle to drive range shifts. At σ=0.14, the same swing drops suitability to ~7%, making climate variability a dominant force in species dynamics.
+
+**Rejected alternatives**:
+- **R2 (spatial fractal noise)**: Terrain already provides spatial differentiation (valley amplification, orographic precip, rain shadows). The issue was sensitivity, not spatial structure. Adding artificial spatial noise would violate the "process over placement" principle.
+- **R5 (discrete climate catastrophe events)**: The existing frost kill, drought mortality, and spring frost damage mechanics should produce visible events naturally once sensitivity is high enough. Adding a separate event system would be artificial.
+
+**Design principle**: These fixes unblock existing mechanisms rather than adding new ones. The climate system, terrain modulation, suitability computation, and biotic pressure were all correctly designed — they just had parameter/baseline choices that independently suppressed the signal at each stage.
