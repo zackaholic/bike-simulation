@@ -20,6 +20,7 @@ import numpy as np
 
 from bike_sim.tiers.climate_hydrology import ClimateHydrologyTier, _distance_transform
 from bike_sim.tiers.ecology import EcologyTier
+from bike_sim.tiers.ground_cover import compute_ground_cover
 from bike_sim.tiers.erosion import (
     ErosionParams,
     SeasonalErosionParams,
@@ -121,11 +122,25 @@ class Orchestrator:
         """Internal: run the seasonal loop without version management."""
         eco = EcologyTier(self._world)
         heightmap = self._world.rasters.read_layer("geology", "heightmap")
-        weather_sys = WeatherSystem(self._world.seed, heightmap)
+
+        # Load spatial climate bias fields if available
+        ch_layers = self._world.rasters.list_layers("climate_hydrology")
+        moisture_bias = (
+            self._world.rasters.read_layer("climate_hydrology", "moisture_bias")
+            if "moisture_bias" in ch_layers else None
+        )
+        continentality = (
+            self._world.rasters.read_layer("climate_hydrology", "continentality")
+            if "continentality" in ch_layers else None
+        )
+        weather_sys = WeatherSystem(
+            self._world.seed, heightmap,
+            moisture_bias=moisture_bias,
+            continentality=continentality,
+        )
 
         # Load mutable terrain state
         store = self._world.rasters
-        ch_layers = store.list_layers("climate_hydrology")
 
         if "eroded_heightmap" in ch_layers:
             eroded_hm = store.read_layer("climate_hydrology", "eroded_heightmap").copy()
@@ -156,6 +171,11 @@ class Orchestrator:
 
             # 2. Tick ecology
             eco.tick(weather)
+
+            # 2b. Compute ground cover from current conditions
+            cover_type, cover_vigor = compute_ground_cover(weather)
+            store.write_layer("ecology", "ground_cover_type", cover_type, eco_clock.tick_number)
+            store.write_layer("ecology", "ground_cover_vigor", cover_vigor, eco_clock.tick_number)
 
             # 3. Tick summary logging
             current_tick = eco_clock.tick_number  # already advanced by eco.tick()
