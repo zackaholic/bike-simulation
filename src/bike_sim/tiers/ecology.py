@@ -1487,6 +1487,13 @@ class EcologyTier:
             total = float(density.sum())
             occupied = int((density > 0.01).sum())
 
+            # Deterministic extinction: zero density and zero seed bank
+            if total <= 0.01 and occupied == 0:
+                seed_total = float(seed_banks.get(sid, np.zeros(1)).sum())
+                if seed_total <= 0.01:
+                    to_remove.append(sid)
+                    continue
+
             if total < mvp_density or occupied < mvp_cells:
                 # Extinction probability increases as population shrinks
                 if total <= 0:
@@ -1559,10 +1566,20 @@ class EcologyTier:
         # Niche saturation: speciation gets harder as niches fill up.
         alive_count = len(species_list)
         saturation_factor = max(0.1, 1.0 - alive_count / 100.0)
-        base_speciation_prob = 0.15 * saturation_factor
+        base_speciation_prob = 0.08 * saturation_factor  # lower base prob for ~500yr average
 
         min_genome_divergence = 0.15  # reject speciation if daughter too similar
         pressure_inheritance = 0.6   # daughter inherits 60% of parent's pressure
+
+        # Role-dependent speciation multiplier:
+        # Trees speciate most readily (heavy seeds can't bridge barriers)
+        # Herbs/forbs rarely speciate (light seeds maintain gene flow)
+        role_speciation_mult = {
+            0: 2.0,  # canopy tree — most likely
+            1: 1.5,  # understory tree
+            2: 1.0,  # shrub — baseline
+            3: 0.5,  # herb/forb/grass — light seeds prevent isolation
+        }
 
         # Load pressure state so daughters can inherit parent pressure
         pressures = self._world.events.get_biotic_pressures()
@@ -1571,10 +1588,10 @@ class EcologyTier:
         for sp in species_list:
             sid = sp["species_id"]
 
-            # Cooldown: species must be at least 100 years old to speciate.
+            # Cooldown: species must be at least 300 years old to speciate.
             # Young species need time to establish identity before fragmenting.
             species_age = current_year - sp.get("appeared_year", 0.0)
-            if species_age < 100.0:
+            if species_age < 300.0:
                 continue
 
             layer_name = f"species_{sid}_density"
@@ -1636,7 +1653,19 @@ class EcologyTier:
                     ):
                         continue  # no barrier — skip this fragment
 
-                if rng.random() < base_speciation_prob:
+                # Apply role-dependent probability
+                growth_form = parent_genome.get("growth_form", 3)
+                if growth_form == 0:  # tree
+                    if parent_genome.get("max_height", 0) > 15:
+                        role_mult = role_speciation_mult[0]
+                    else:
+                        role_mult = role_speciation_mult[1]
+                elif growth_form == 1:  # shrub
+                    role_mult = role_speciation_mult[2]
+                else:
+                    role_mult = role_speciation_mult[3]
+
+                if rng.random() < base_speciation_prob * role_mult:
                     # ── Adaptive drift: bias toward local environment ──
                     # Compute mean environmental conditions over the fragment
                     local_env: dict[str, float] = {}
@@ -1665,8 +1694,9 @@ class EcologyTier:
                                 new_val += int(rng.choice([-1, 1]))
                             new_genome[key] = int(np.clip(new_val, 1, 7))
                         elif key in _MORPHOLOGICAL_TRAITS:
-                            # Higher variance for visual divergence
-                            drift = float(rng.normal(0, 0.15))
+                            # Much higher variance for visual divergence —
+                            # speciation should produce visibly distinct species
+                            drift = float(rng.normal(0, 0.25))
                             new_genome[key] = float(np.clip(val + drift, 0.0, 1.0))
                         elif key in _BOUNDED_FUNCTIONAL:
                             # Adaptive drift: bias toward local environment
@@ -1741,7 +1771,7 @@ class EcologyTier:
 
         max_reabsorption_distance = 0.25  # must be below niche_width (0.3)
         min_overlap_fraction = 0.2  # 20% of smaller species' range must overlap
-        min_species_age = 100.0  # years — prevent immediate reabsorption after speciation
+        min_species_age = 300.0  # years — prevent immediate reabsorption after speciation
 
         # Load genomes and densities for all living species.
         species_data: list[dict] = []
