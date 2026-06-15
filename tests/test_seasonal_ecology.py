@@ -153,11 +153,11 @@ class TestTickSignature:
         eco.tick(make_weather(SPRING))
 
         species = eco_world.events.list_species()
-        assert len(species) >= 5, (
-            f"Expected at least 5 ancestor species, got {len(species)}"
+        assert len(species) >= 10, (
+            f"Expected at least 10 ancestor species, got {len(species)}"
         )
-        assert len(species) <= 8, (
-            f"Expected at most 8 ancestor species, got {len(species)}"
+        assert len(species) <= 20, (
+            f"Expected at most 20 ancestor species, got {len(species)}"
         )
 
     def test_tick_produces_density_layers(self, eco_world):

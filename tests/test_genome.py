@@ -239,7 +239,7 @@ class TestMorphologicalCoupling:
     def test_evergreenness_leaf_shape_negative_correlation(self, ancestor_genomes):
         """High evergreenness should correlate with lower leaf_shape (needle-like).
 
-        We check that across the 6 ancestors, the Pearson correlation between
+        We check that across the ancestors, the Pearson correlation between
         evergreenness and leaf_shape is negative.
         """
         evergreenness = [g["evergreenness"] for g in ancestor_genomes.values()]
@@ -285,10 +285,12 @@ class TestMorphologicalCoupling:
 
 
 class TestAncestorTraitValues:
-    def test_six_ancestors_created(self, ancestor_genomes):
-        """Exactly 6 ancestor species should be created."""
-        assert len(ancestor_genomes) == 6, (
-            f"Expected 6 ancestors, got {len(ancestor_genomes)}"
+    def test_ancestors_created(self, ancestor_genomes):
+        """All ancestor species should be created."""
+        from bike_sim.tiers.ecology import _ANCESTOR_TEMPLATES
+        expected = len(_ANCESTOR_TEMPLATES)
+        assert len(ancestor_genomes) == expected, (
+            f"Expected {expected} ancestors, got {len(ancestor_genomes)}"
         )
 
     def test_new_functional_traits_present(self, ancestor_genomes):
@@ -318,13 +320,13 @@ class TestAncestorTraitValues:
             f"alpine_cushion evergreenness={val}, expected > 0.6"
         )
 
-    def test_valley_tree_mast_interval(self, ancestor_genomes):
-        """valley_tree should have mast_interval >= 3."""
-        tree = [g for sid, g in ancestor_genomes.items() if "valley_tree" in sid]
-        assert len(tree) == 1, f"Expected 1 valley_tree, found {len(tree)}"
+    def test_valley_hardwood_mast_interval(self, ancestor_genomes):
+        """valley_hardwood should have mast_interval >= 3."""
+        tree = [g for sid, g in ancestor_genomes.items() if "valley_hardwood" in sid]
+        assert len(tree) == 1, f"Expected 1 valley_hardwood, found {len(tree)}"
         val = tree[0]["mast_interval"]
         assert val >= 3, (
-            f"valley_tree mast_interval={val}, expected >= 3"
+            f"valley_hardwood mast_interval={val}, expected >= 3"
         )
 
     def test_ancestor_traits_close_to_templates(self, ancestor_genomes):

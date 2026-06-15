@@ -42,14 +42,158 @@ _BOUNDED_FUNCTIONAL = {
 }
 
 # Archetype trait templates: (name, genome dict before perturbation).
+# Organized by structural role for broad world coverage:
+#   Canopy trees (3): slow, tall, heavy seeds, expensive to render
+#   Understory trees (2): faster, shorter, moderate seeds
+#   Tall shrubs (4): moderate height, wide tolerance ranges
+#   Low shrubs/forbs (5): fast, short, light seeds, cheap to render
 _ANCESTOR_TEMPLATES: list[tuple[str, dict]] = [
+    # ── Canopy trees ──────────────────────────────────────────────
     (
-        "lowland_herb",
+        "valley_hardwood",  # warm, wet lowlands — deciduous canopy tree
+        {
+            "drought_tolerance": 0.25,
+            "frost_tolerance": 0.2,
+            "shade_tolerance": 0.7,
+            "growth_rate": 0.2,
+            "seed_mass": 0.8,
+            "max_height": 30.0,
+            "lifespan": 400.0,
+            "phenological_aggressiveness": 0.3,
+            "evergreenness": 0.1,
+            "mast_interval": 5,
+        },
+    ),
+    (
+        "upland_conifer",  # cool, moderate moisture — evergreen canopy tree
+        {
+            "drought_tolerance": 0.5,
+            "frost_tolerance": 0.7,
+            "shade_tolerance": 0.6,
+            "growth_rate": 0.15,
+            "seed_mass": 0.6,
+            "max_height": 25.0,
+            "lifespan": 500.0,
+            "phenological_aggressiveness": 0.1,
+            "evergreenness": 0.9,
+            "mast_interval": 4,
+        },
+    ),
+    (
+        "wet_broadleaf",  # wet, mild — tall broadleaf in moist areas
+        {
+            "drought_tolerance": 0.15,
+            "frost_tolerance": 0.3,
+            "shade_tolerance": 0.8,
+            "growth_rate": 0.25,
+            "seed_mass": 0.7,
+            "max_height": 28.0,
+            "lifespan": 350.0,
+            "phenological_aggressiveness": 0.4,
+            "evergreenness": 0.3,
+            "mast_interval": 3,
+        },
+    ),
+    # ── Understory / edge trees ───────────────────────────────────
+    (
+        "gap_filler",  # fast-growing edge tree, colonizes clearings
+        {
+            "drought_tolerance": 0.35,
+            "frost_tolerance": 0.35,
+            "shade_tolerance": 0.4,
+            "growth_rate": 0.5,
+            "seed_mass": 0.4,
+            "max_height": 12.0,
+            "lifespan": 80.0,
+            "phenological_aggressiveness": 0.6,
+            "evergreenness": 0.2,
+            "mast_interval": 2,
+        },
+    ),
+    (
+        "riparian_tree",  # moisture-loving streamside tree
+        {
+            "drought_tolerance": 0.1,
+            "frost_tolerance": 0.4,
+            "shade_tolerance": 0.3,
+            "growth_rate": 0.45,
+            "seed_mass": 0.3,
+            "max_height": 15.0,
+            "lifespan": 100.0,
+            "phenological_aggressiveness": 0.5,
+            "evergreenness": 0.1,
+            "mast_interval": 1,
+        },
+    ),
+    # ── Tall shrubs ───────────────────────────────────────────────
+    (
+        "ridge_scrub",  # drought-hardy exposed ridgeline shrub
+        {
+            "drought_tolerance": 0.8,
+            "frost_tolerance": 0.5,
+            "shade_tolerance": 0.1,
+            "growth_rate": 0.3,
+            "seed_mass": 0.35,
+            "max_height": 3.0,
+            "lifespan": 60.0,
+            "phenological_aggressiveness": 0.2,
+            "evergreenness": 0.7,
+            "mast_interval": 2,
+        },
+    ),
+    (
+        "valley_thicket",  # wet valley shrub, forms dense stands
+        {
+            "drought_tolerance": 0.2,
+            "frost_tolerance": 0.3,
+            "shade_tolerance": 0.5,
+            "growth_rate": 0.4,
+            "seed_mass": 0.3,
+            "max_height": 4.0,
+            "lifespan": 40.0,
+            "phenological_aggressiveness": 0.5,
+            "evergreenness": 0.3,
+            "mast_interval": 1,
+        },
+    ),
+    (
+        "heath_shrub",  # cold-tolerant moorland/heathland shrub
+        {
+            "drought_tolerance": 0.55,
+            "frost_tolerance": 0.7,
+            "shade_tolerance": 0.15,
+            "growth_rate": 0.25,
+            "seed_mass": 0.2,
+            "max_height": 1.5,
+            "lifespan": 50.0,
+            "phenological_aggressiveness": 0.15,
+            "evergreenness": 0.8,
+            "mast_interval": 2,
+        },
+    ),
+    (
+        "dry_scrub",  # arid-adapted shrub
+        {
+            "drought_tolerance": 0.9,
+            "frost_tolerance": 0.4,
+            "shade_tolerance": 0.05,
+            "growth_rate": 0.2,
+            "seed_mass": 0.25,
+            "max_height": 2.0,
+            "lifespan": 70.0,
+            "phenological_aggressiveness": 0.1,
+            "evergreenness": 0.6,
+            "mast_interval": 3,
+        },
+    ),
+    # ── Low shrubs / forbs / ground-hugging ───────────────────────
+    (
+        "meadow_herb",  # mesic meadow flowering herb
         {
             "drought_tolerance": 0.3,
-            "frost_tolerance": 0.15,
+            "frost_tolerance": 0.3,
             "shade_tolerance": 0.3,
-            "growth_rate": 0.85,
+            "growth_rate": 0.8,
             "seed_mass": 0.1,
             "max_height": 0.5,
             "lifespan": 10.0,
@@ -59,7 +203,7 @@ _ANCESTOR_TEMPLATES: list[tuple[str, dict]] = [
         },
     ),
     (
-        "upland_grass",
+        "upland_grass",  # cold-tolerant grassland species
         {
             "drought_tolerance": 0.45,
             "frost_tolerance": 0.75,
@@ -74,37 +218,7 @@ _ANCESTOR_TEMPLATES: list[tuple[str, dict]] = [
         },
     ),
     (
-        "valley_tree",
-        {
-            "drought_tolerance": 0.3,
-            "frost_tolerance": 0.25,
-            "shade_tolerance": 0.8,
-            "growth_rate": 0.2,
-            "seed_mass": 0.75,
-            "max_height": 25.0,
-            "lifespan": 300.0,
-            "phenological_aggressiveness": 0.3,
-            "evergreenness": 0.2,
-            "mast_interval": 4,
-        },
-    ),
-    (
-        "ridge_shrub",
-        {
-            "drought_tolerance": 0.8,
-            "frost_tolerance": 0.5,
-            "shade_tolerance": 0.15,
-            "growth_rate": 0.35,
-            "seed_mass": 0.4,
-            "max_height": 3.0,
-            "lifespan": 60.0,
-            "phenological_aggressiveness": 0.2,
-            "evergreenness": 0.7,
-            "mast_interval": 2,
-        },
-    ),
-    (
-        "pioneer_forb",
+        "pioneer_forb",  # fast-growing disturbance colonizer
         {
             "drought_tolerance": 0.35,
             "frost_tolerance": 0.35,
@@ -119,7 +233,7 @@ _ANCESTOR_TEMPLATES: list[tuple[str, dict]] = [
         },
     ),
     (
-        "alpine_cushion",
+        "alpine_cushion",  # high-altitude stress-tolerator
         {
             "drought_tolerance": 0.65,
             "frost_tolerance": 0.85,
@@ -131,6 +245,21 @@ _ANCESTOR_TEMPLATES: list[tuple[str, dict]] = [
             "phenological_aggressiveness": 0.1,
             "evergreenness": 0.8,
             "mast_interval": 3,
+        },
+    ),
+    (
+        "dry_grass",  # drought-adapted grassland species
+        {
+            "drought_tolerance": 0.75,
+            "frost_tolerance": 0.4,
+            "shade_tolerance": 0.1,
+            "growth_rate": 0.5,
+            "seed_mass": 0.1,
+            "max_height": 0.6,
+            "lifespan": 8.0,
+            "phenological_aggressiveness": 0.3,
+            "evergreenness": 0.2,
+            "mast_interval": 1,
         },
     ),
 ]
@@ -279,7 +408,7 @@ class EcologyTier:
 
     GRID_SIZE: int = 1000
     YEARS_PER_TICK: float = 0.25
-    NUM_ANCESTORS: int = 6  # within the test-required 5-8 range
+    NUM_ANCESTORS: int = 14  # 3 canopy + 2 understory + 4 shrub + 5 forb/grass
     CELL_SIZE: float = 50.0  # meters per grid cell (50 km / 1000 cells)
 
     def __init__(self, world: World) -> None:
@@ -447,6 +576,17 @@ class EcologyTier:
     # ── initial populations ────────────────────────────────────────
 
     def _seed_initial_populations(self, tick_number: int, weather: SeasonalWeather) -> None:
+        """Broad noise-based placement: scatter species across suitable habitat.
+
+        Each species gets a unique noise field (from world seed + species index)
+        that creates natural clustering (groves, patches). Initial density is
+        suitability * noise * role-based max density, zeroed below a threshold.
+
+        This produces a world that is already "full" — every habitable cell has
+        vegetation appropriate to its climate zone.
+        """
+        from bike_sim.tiers.geology import _bilinear_upsample
+
         rng = create_rng(self._world.seed, "ecology", "init_pop", tick_number)
         store = self._world.rasters
 
@@ -463,16 +603,61 @@ class EcologyTier:
             season=1,  # cosmetic; suitability doesn't check this field
         )
 
-        for sp in self._world.events.list_species():
+        # Role-based max density: trees are sparse, forbs are dense
+        role_max_density = {
+            0: 1.5,   # canopy tree: sparse (heavy geometry)
+            1: 2.5,   # understory tree: moderate
+            2: 3.0,   # tall shrub: moderate-dense
+            3: 4.0,   # low shrub/forb: dense
+        }
+
+        for idx, sp in enumerate(self._world.events.list_species()):
             sid = sp["species_id"]
             genome = self._world.events.get_species(sid)["genome"]
             suit = self._compute_suitability_from_weather(genome, annual_weather)
-            # Place low density in areas with good suitability.
+
+            # Determine structural role from growth_form
+            growth_form = genome.get("growth_form", 3)
+            if growth_form == 0:  # tree
+                if genome.get("max_height", 0) > 15:
+                    role = 0  # canopy
+                else:
+                    role = 1  # understory
+            elif growth_form == 1:  # shrub
+                role = 2
+            else:  # herb, grass, cushion
+                role = 3
+
+            max_density = role_max_density[role]
+
+            # Generate species-specific clustering noise
+            # Use different noise sizes per role for different spatial patterns:
+            # Trees cluster in groves (large patches), forbs are more dispersed
+            noise_sizes = {0: (5, 10), 1: (6, 12), 2: (8, 16), 3: (10, 20)}
+            sz1, sz2 = noise_sizes[role]
+
+            noise = np.zeros((self.GRID_SIZE, self.GRID_SIZE), dtype=np.float64)
+            n1 = rng.random((sz1, sz1))
+            noise += _bilinear_upsample(n1, self.GRID_SIZE) * 1.0
+            n2 = rng.random((sz2, sz2))
+            noise += _bilinear_upsample(n2, self.GRID_SIZE) * 0.5
+
+            # Normalize noise to [0, 1]
+            lo, hi = noise.min(), noise.max()
+            if hi > lo:
+                noise = (noise - lo) / (hi - lo)
+            else:
+                noise[:] = 0.5
+
+            # Initial density = suitability * noise * max_density
+            # with a suitability threshold to prevent placement in truly
+            # unsuitable areas
             initial = np.where(
-                suit > 0.3,
-                suit * rng.uniform(0.5, 2.0, suit.shape),
+                suit > 0.15,
+                suit * noise * max_density,
                 0.0,
             )
+
             store.write_layer(
                 TIER,
                 f"species_{sid}_density",
