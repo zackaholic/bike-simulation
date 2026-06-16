@@ -64,7 +64,7 @@ Phases 0 through 8 are complete. The simulation is end-to-end functional.
 
 **By the numbers:** 138 tests passing, ~3100 lines source, ~2300 lines tests.
 
-**CLI:** `python -m bike_sim` with subcommands: `create`, `advance`, `ride`, `status`, `fire`, `visualize`.
+**CLI:** `python -m bike_sim` with subcommands: `create`, `advance`, `ride`, `status`, `fire`, `visualize`, `ride-experience`.
 
 **End-to-end benchmark:** seed 42 after 125 simulated years produces 15 species (from 6 ancestors), 753 distinguished individuals, 35 fires + 9 blowdowns.
 

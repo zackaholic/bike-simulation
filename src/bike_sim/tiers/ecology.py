@@ -1542,6 +1542,12 @@ class EcologyTier:
 
         for sp in species_list:
             sid = sp["species_id"]
+            genome = self._world.events.get_species(sid)["genome"]
+            growth_form = genome.get("growth_form", 3)
+            # Only promote trees (canopy + understory) to DI status.
+            # Shrubs/forbs are too small and numerous to be narratively meaningful.
+            if growth_form != 0:  # 0 = tree
+                continue
             layer_name = f"species_{sid}_density"
             if layer_name not in store.list_layers(TIER):
                 continue

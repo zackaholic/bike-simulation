@@ -129,9 +129,9 @@ class WeatherSystem:
 
         # Fractal noise parameters
         self._num_octaves = 7
-        self._base_freq = 1.0 / 800.0   # lowest octave wavelength ~800 years
+        self._base_freq = 1.0 / 300.0   # lowest octave wavelength ~300 years
         self._lacunarity = 2.0           # each octave doubles in frequency
-        self._persistence = 0.55         # each octave has 55% of previous amplitude
+        self._persistence = 0.7          # each octave has 70% of previous amplitude
         self._base_amp_temp = 3.0        # lowest octave: ±3°C
         self._base_amp_precip = 0.15     # lowest octave: ±15% precip (log space)
 

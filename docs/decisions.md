@@ -685,3 +685,24 @@ Additionally, the world lacked spatial climate variation beyond elevation. Every
 ### Full design document
 
 See `docs/ground-cover-and-spatial-climate.md` for the complete design including implementation phases, open questions, and rendering considerations.
+
+---
+
+## R2026-06-16 — Weather cycle tuning, DI filter, ride experience tool
+
+### Precipitation cycle period: 800yr → 300yr
+**Decision**: Shorten `_base_freq` from 1/800 to 1/300, increase `_persistence` from 0.55 to 0.7.
+
+**Why**: The 800-year base period was hardcoded (not seed-dependent), meaning 1000-year calibration runs only captured 1.25 cycles of the dominant mode. Precipitation appeared static. At 300yr, runs see 3+ complete cycles and shorter octaves (100yr, 50yr) contribute more relative variation due to the higher persistence.
+
+### DI promotion limited to trees only
+**Decision**: Only growth_form==0 (trees) are promoted to distinguished individual status. Shrubs, forbs, and grasses skip promotion entirely.
+
+**Why**: With 14 species and 2–5 promotions per species per year, the system generated 30–90 DIs/year — too many, and narratively meaningless for small plants. Trees are the species the rider notices and grows attached to. This cuts DI volume by ~60% and keeps the DI system narratively focused.
+
+### Ride experience tool
+**Decision**: New `ride-experience` CLI command and extract module that generates a bike path through the world and samples species density along perpendicular cross-sections.
+
+**Why**: With the simulation approaching a rideable state, we need a renderer-agnostic way to evaluate the rider experience — whether species distributions create interesting transitions, whether terrain grade is rideable, whether the world feels inhabited. The perpendicular bar sampling (±50m, every 50m of path distance) avoids POV-turning artifacts that a cone would introduce. Distance-based snapshots (not time-based) ensure consistent spatial resolution regardless of riding speed or turn radius.
+
+**Implementation**: A* pathfinding on grade cost surface connecting well-spread waypoints (farthest-point sampling). Path stored as a raster layer for webview display. Experience graph shows elevation/grade, species density, and ground cover along ride distance.
