@@ -165,6 +165,14 @@ def _cmd_ride_experience(args: argparse.Namespace) -> None:
     run_ride_experience(args.world_dir, output_dir=output_dir)
 
 
+def _cmd_ride_compare(args: argparse.Namespace) -> None:
+    """Compare ride experience across multiple snapshots."""
+    from bike_sim.extract.ride_experience import run_snapshot_comparison
+
+    output_dir = getattr(args, "output_dir", None)
+    run_snapshot_comparison(args.world_dir, output_dir=output_dir)
+
+
 def main(argv: list[str] | None = None) -> None:
     """Parse arguments and dispatch to the appropriate subcommand."""
     parser = argparse.ArgumentParser(
@@ -217,6 +225,16 @@ def main(argv: list[str] | None = None) -> None:
         help="Output directory (default: <world_dir>/ride_output/).",
     )
 
+    # -- ride-compare --
+    p_rcmp = subparsers.add_parser(
+        "ride-compare", help="Compare ride experience across snapshots.",
+    )
+    p_rcmp.add_argument("world_dir", help="Path to an existing world directory.")
+    p_rcmp.add_argument(
+        "--output-dir", default=None,
+        help="Output directory (default: <world_dir>/ride_output/).",
+    )
+
     args = parser.parse_args(argv)
 
     dispatch = {
@@ -227,6 +245,7 @@ def main(argv: list[str] | None = None) -> None:
         "fire": _cmd_fire,
         "visualize": _cmd_visualize,
         "ride-experience": _cmd_ride_experience,
+        "ride-compare": _cmd_ride_compare,
     }
     dispatch[args.command](args)
 

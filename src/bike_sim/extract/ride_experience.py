@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
-    from bike_sim.state.world import World
+    from bike_sim.world import World
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -317,6 +317,7 @@ def sample_ride_experience(
     sample_interval: float = SAMPLE_INTERVAL_M,
     bar_half: float = SAMPLE_BAR_HALF_M,
     bar_points: int = SAMPLE_BAR_POINTS,
+    version: int | None = None,
 ) -> dict:
     """Sample species density and terrain along perpendicular cross-sections.
 
@@ -351,23 +352,23 @@ def sample_ride_experience(
     sample_y = np.interp(sample_dists, cum_dist, coords[:, 1])
     sample_heading = np.interp(sample_dists, cum_dist, headings)
 
-    # Load raster layers
-    heightmap = store.read_layer("geology", "heightmap")
+    # Load raster layers (version-aware)
+    heightmap = store.read_layer("geology", "heightmap", version=version)
 
     # Find all species density layers
     species_pattern = re.compile(r"^species_(.+)_density$")
     species_layers: dict[str, np.ndarray] = {}
-    for layer_name in store.list_layers("ecology"):
+    for layer_name in store.list_layers("ecology", version=version):
         m = species_pattern.match(layer_name)
         if m:
-            species_layers[m.group(1)] = store.read_layer("ecology", layer_name)
+            species_layers[m.group(1)] = store.read_layer("ecology", layer_name, version=version)
 
     # Try to load ground cover
-    eco_layers = store.list_layers("ecology")
+    eco_layers = store.list_layers("ecology", version=version)
     has_ground_cover = "ground_cover_type" in eco_layers
     if has_ground_cover:
-        gc_type = store.read_layer("ecology", "ground_cover_type")
-        gc_vigor = store.read_layer("ecology", "ground_cover_vigor")
+        gc_type = store.read_layer("ecology", "ground_cover_type", version=version)
+        gc_vigor = store.read_layer("ecology", "ground_cover_vigor", version=version)
 
     # Bar offsets perpendicular to heading
     bar_offsets = np.linspace(-bar_half, bar_half, bar_points)
@@ -596,7 +597,7 @@ def run_ride_experience(
     - ride_experience.json — full sample data
     - ride_experience.png — the experience graph
     """
-    from bike_sim.state.world import World
+    from bike_sim.world import World
 
     world_dir = Path(world_dir)
     if output_dir is None:
@@ -604,7 +605,7 @@ def run_ride_experience(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    world = World(world_dir)
+    world = World.open(world_dir)
     heightmap = world.rasters.read_layer("geology", "heightmap")
 
     print(f"Generating ride path (world seed {world.seed})...")
@@ -660,3 +661,170 @@ def run_ride_experience(
             print(f"    {sid}: peak {max(densities):.1f}, mean {np.mean(densities):.1f}")
 
     return experience
+
+
+# ---------------------------------------------------------------------------
+# Multi-snapshot comparison
+# ---------------------------------------------------------------------------
+
+def plot_snapshot_comparison(
+    snapshots: dict[str, dict],
+    output_path: str | Path,
+    title: str = "Ride Experience Across Time",
+) -> None:
+    """Plot species density along the ride for multiple snapshots.
+
+    Each snapshot gets its own sub-panel showing the species density profile,
+    with shared x-axis (ride distance) for easy comparison.
+
+    Args:
+        snapshots: {label: experience_dict} ordered by time
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import hsv_to_rgb
+
+    labels = list(snapshots.keys())
+    n_panels = len(labels)
+    if n_panels == 0:
+        return
+
+    # Collect all species across all snapshots for consistent coloring
+    all_species: set[str] = set()
+    for exp in snapshots.values():
+        all_species.update(exp.get("species", {}).keys())
+    sorted_species = sorted(all_species)
+    n_sp = len(sorted_species)
+    colors = {
+        sid: hsv_to_rgb((i / max(n_sp, 1), 0.7, 0.85))
+        for i, sid in enumerate(sorted_species)
+    }
+
+    fig, axes = plt.subplots(
+        n_panels + 1, 1,
+        figsize=(16, 3 * (n_panels + 1)),
+        sharex=True,
+        gridspec_kw={"height_ratios": [1] + [1] * n_panels},
+    )
+
+    # Top panel: elevation (same for all snapshots)
+    first_exp = next(iter(snapshots.values()))
+    distances_km = [d / 1000.0 for d in first_exp["distances"]]
+
+    ax0 = axes[0]
+    ax0.fill_between(distances_km, first_exp["elevation"], alpha=0.3, color="brown")
+    ax0.plot(distances_km, first_exp["elevation"], color="brown", linewidth=0.8)
+    ax0.set_ylabel("Elevation (m)")
+    ax0.set_title(title)
+
+    # Find global y-max for consistent species density scale
+    y_max = 0.01
+    for exp in snapshots.values():
+        for densities in exp.get("species", {}).values():
+            if densities:
+                y_max = max(y_max, max(densities))
+    y_max *= 1.1
+
+    # Species panels
+    for i, label in enumerate(labels):
+        ax = axes[i + 1]
+        exp = snapshots[label]
+        species = exp.get("species", {})
+
+        # Sort by total density for this snapshot
+        present = sorted(
+            [(sid, species[sid]) for sid in sorted_species if sid in species],
+            key=lambda kv: sum(kv[1]),
+            reverse=True,
+        )
+
+        for sid, densities in present:
+            ax.fill_between(distances_km[:len(densities)], densities, alpha=0.25, color=colors[sid])
+            ax.plot(distances_km[:len(densities)], densities, linewidth=0.7, color=colors[sid], label=sid)
+
+        ax.set_ylabel(f"Density\n{label}")
+        ax.set_ylim(0, y_max)
+
+        # Only show legend on first species panel
+        if i == 0 and present:
+            ax.legend(loc="upper right", fontsize=5, ncol=min(5, len(present)))
+
+    axes[-1].set_xlabel("Distance Along Ride (km)")
+
+    plt.tight_layout()
+    plt.savefig(str(output_path), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def run_snapshot_comparison(
+    world_dir: str | Path,
+    output_dir: str | Path | None = None,
+    snapshot_versions: list[int] | None = None,
+) -> None:
+    """Sample the ride experience at multiple snapshots and produce a comparison.
+
+    If snapshot_versions is None, samples every available snapshot.
+    Reuses existing ride path from ride_output/ride_path.json.
+    """
+    from bike_sim.world import World
+
+    world_dir = Path(world_dir)
+    if output_dir is None:
+        output_dir = world_dir / "ride_output"
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load existing path
+    path_file = output_dir / "ride_path.json"
+    if not path_file.exists():
+        print("No ride path found. Run ride-experience first.")
+        return
+    path = load_path(path_file)
+
+    world = World.open(world_dir)
+
+    # Determine which snapshots to sample
+    if snapshot_versions is None:
+        versions_info = world.list_versions()
+        snapshot_versions = []
+        for entry in versions_info:
+            vid = entry["version_id"]
+            eco = entry.get("tier_clocks", {}).get("ecology", {})
+            year = eco.get("simulated_year", 0) if isinstance(eco, dict) else 0
+            if year > 0:  # skip version 0 (no ecology yet)
+                snapshot_versions.append((vid, year))
+    else:
+        versions_info = world.list_versions()
+        year_map = {}
+        for entry in versions_info:
+            eco = entry.get("tier_clocks", {}).get("ecology", {})
+            year_map[entry["version_id"]] = eco.get("simulated_year", 0) if isinstance(eco, dict) else 0
+        snapshot_versions = [(v, year_map.get(v, 0)) for v in snapshot_versions]
+
+    print(f"Sampling {len(snapshot_versions)} snapshots along the ride path...")
+    snapshots: dict[str, dict] = {}
+
+    for vid, year in snapshot_versions:
+        label = f"Year {year:.0f}"
+        print(f"  Sampling {label} (version {vid})...")
+        exp = sample_ride_experience(world, path, version=vid)
+        snapshots[label] = exp
+        n_visible = len(exp.get("species", {}))
+        print(f"    {n_visible} species visible")
+
+    # Plot comparison
+    comp_path = output_dir / "ride_comparison.png"
+    plot_snapshot_comparison(snapshots, comp_path)
+    print(f"\nComparison graph: {comp_path}")
+
+    # Save data
+    comp_data_path = output_dir / "ride_comparison.json"
+    Path(comp_data_path).write_text(json.dumps(
+        {label: {"species": exp["species"], "num_species": len(exp["species"])}
+         for label, exp in snapshots.items()},
+        indent=2,
+    ))
+    print(f"Comparison data: {comp_data_path}")
+
+    world.close()
