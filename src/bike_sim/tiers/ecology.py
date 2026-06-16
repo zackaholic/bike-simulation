@@ -677,17 +677,36 @@ class EcologyTier:
         n = self.GRID_SIZE
         suit = np.ones((n, n), dtype=np.float64)
 
-        # Moisture suitability (derive soil moisture from precipitation + terrain)
-        # Normalize precipitation to [0, 1] range
-        precip_norm = np.clip(weather.precipitation / 2000.0, 0, 1)
+        # Moisture suitability — normalize against actual map range so the
+        # full [0, 1] drought_stress spectrum is available.  Fixed /2000
+        # denominator clamped drought_stress to [0, ~0.6], making dry-niche
+        # species (drought_tolerance > 0.6) structurally impossible.
+        # When spatial range is narrow (e.g. uniform test input), center at
+        # the absolute position within a reference range (0-3000mm).
+        p_min = float(weather.precipitation.min())
+        p_max = float(weather.precipitation.max())
+        p_span = p_max - p_min
+        if p_span > 200.0:
+            # Real spatial variation — normalize to fill [0, 1]
+            precip_norm = np.clip((weather.precipitation - p_min) / p_span, 0, 1)
+        else:
+            # Narrow range — use absolute position in reference range
+            precip_norm = np.clip(weather.precipitation / 3000.0, 0, 1)
         drought_stress = 1.0 - precip_norm
-        suit *= _gaussian_match(drought_stress, genome["drought_tolerance"], sigma=0.17)
+        suit *= _gaussian_match(drought_stress, genome["drought_tolerance"], sigma=0.25)
 
-        # Temperature suitability
-        # Normalize temperature to a preference scale
-        temp_norm = np.clip((weather.temperature - (-10)) / 30.0, 0, 1)  # -10C to 20C range
+        # Temperature suitability — same approach: relative when there's
+        # spatial variation, absolute when uniform.
+        t_min = float(weather.temperature.min())
+        t_max = float(weather.temperature.max())
+        t_span = t_max - t_min
+        if t_span > 5.0:
+            temp_norm = np.clip((weather.temperature - t_min) / t_span, 0, 1)
+        else:
+            # Narrow range — use absolute position in reference range (-10 to 25°C)
+            temp_norm = np.clip((weather.temperature - (-10.0)) / 35.0, 0, 1)
         warmth_preference = 1.0 - genome["frost_tolerance"]
-        suit *= _gaussian_match(temp_norm, warmth_preference, sigma=0.17)
+        suit *= _gaussian_match(temp_norm, warmth_preference, sigma=0.25)
 
         # Light competition via canopy shading (max_height becomes load-bearing)
         if canopy_shade is not None:
@@ -900,8 +919,8 @@ class EcologyTier:
         if tick_num == 0:
             return
 
-        # Derive moisture from precipitation
-        moisture = np.clip(weather.precipitation / 2000.0, 0, 1)
+        # Derive moisture from precipitation (absolute scale for fire risk)
+        moisture = np.clip(weather.precipitation / 3000.0, 0, 1)
 
         # Fire probability scales with dryness and storm intensity
         # Fewer fires per seasonal tick than per 5-year tick
@@ -980,20 +999,21 @@ class EcologyTier:
             seed_production = density * genome["growth_rate"] * 0.3 * seed_multiplier
 
             # Local dispersal (kernel radius scales with seed lightness)
-            dispersal_radius = 1 + int(2 * (1.0 - genome["seed_mass"]))
+            # Increased from 1-3 to 2-6 cells (100-300m) for meaningful spread
+            dispersal_radius = 2 + int(4 * (1.0 - genome["seed_mass"]))
             seed_input = _disperse(seed_production, dispersal_radius)
 
             # Long-distance dispersal scaled by seed_mass.
             # Light seeds (low mass) = wind/bird carried, frequent long jumps.
             # Heavy seeds (high mass) = gravity/mammal, rare short jumps.
-            # This bridges gaps that would otherwise cause false fragmentation.
+            # This bridges gaps and enables colonization of distant suitable habitat.
             seed_mass = genome["seed_mass"]
-            ldd_probability = 0.4 * (1.0 - seed_mass)  # 0-40% chance per tick
+            ldd_probability = 0.6 * (1.0 - seed_mass) + 0.1  # 10-70% chance per tick
             if rng.random() < ldd_probability:
                 # Number of landing sites scales with lightness
-                ldd_count = int(rng.integers(2, 6 + int(10 * (1.0 - seed_mass))))
+                ldd_count = int(rng.integers(5, 15 + int(20 * (1.0 - seed_mass))))
                 # Max jump distance scales inversely with mass
-                max_jump = int(n * (0.1 + 0.4 * (1.0 - seed_mass)))  # 10-50% of grid
+                max_jump = int(n * (0.15 + 0.4 * (1.0 - seed_mass)))  # 15-55% of grid
                 for _ in range(ldd_count):
                     # Pick a source cell with high density
                     source_cells = np.argwhere(density > 1.0)
@@ -1006,8 +1026,8 @@ class EcologyTier:
                     dc = int(rng.integers(-max_jump, max_jump + 1))
                     tr = int(np.clip(sr + dr, 0, n - 1))
                     tc = int(np.clip(sc + dc, 0, n - 1))
-                    # Deposit seeds (amount scales with source density)
-                    deposit = float(density[sr, sc]) * 0.01 * rng.uniform(0.5, 2.0)
+                    # Deposit seeds — enough to establish a viable colony
+                    deposit = float(density[sr, sc]) * 0.05 * rng.uniform(0.5, 2.0)
                     seed_input[tr, tc] += deposit
 
             # Seed bank: decay + input
@@ -1390,7 +1410,7 @@ class EcologyTier:
         mean_temp = float(weather.temperature.mean())
         mean_precip = float(weather.precipitation.mean())
         temp_factor = float(np.clip((mean_temp - 2.0) / 16.0, 0, 1))    # 2°C→0, 18°C→1
-        precip_factor = float(np.clip(mean_precip / 2000.0, 0, 1))      # 0mm→0, 2000mm→1
+        precip_factor = float(np.clip(mean_precip / 3000.0, 0, 1))      # 0mm→0, 3000mm→1
         pathogen_favorability = temp_factor * precip_factor               # 0 to 1
 
         # Modulate: growth_k 50%-150% of base, decay faster when unfavorable
@@ -1670,9 +1690,21 @@ class EcologyTier:
                     # Compute mean environmental conditions over the fragment
                     local_env: dict[str, float] = {}
                     if weather is not None:
-                        precip_norm = np.clip(weather.precipitation / 2000.0, 0, 1)
+                        p_min = float(weather.precipitation.min())
+                        p_max = float(weather.precipitation.max())
+                        p_span = p_max - p_min
+                        if p_span > 200.0:
+                            precip_norm = np.clip((weather.precipitation - p_min) / p_span, 0, 1)
+                        else:
+                            precip_norm = np.clip(weather.precipitation / 3000.0, 0, 1)
                         local_drought = float((1.0 - precip_norm)[fragment_mask].mean())
-                        temp_norm = np.clip((weather.temperature - (-10)) / 30.0, 0, 1)
+                        t_min = float(weather.temperature.min())
+                        t_max = float(weather.temperature.max())
+                        t_span = t_max - t_min
+                        if t_span > 5.0:
+                            temp_norm = np.clip((weather.temperature - t_min) / t_span, 0, 1)
+                        else:
+                            temp_norm = np.clip((weather.temperature - (-10.0)) / 35.0, 0, 1)
                         local_warmth = float(temp_norm[fragment_mask].mean())
                         local_env["drought_tolerance"] = local_drought
                         local_env["frost_tolerance"] = 1.0 - local_warmth
@@ -1806,7 +1838,13 @@ class EcologyTier:
             # We need hospitable terrain per-pair, but a general hospitable map
             # (using mean suitability of both species) is a reasonable proxy.
             # Use a fixed moderate genome for the hospitable check.
-            suit_full = np.clip(weather.precipitation / 2000.0, 0, 1)  # moisture proxy
+            p_min = float(weather.precipitation.min())
+            p_max = float(weather.precipitation.max())
+            p_span = p_max - p_min
+            if p_span > 200.0:
+                suit_full = np.clip((weather.precipitation - p_min) / p_span, 0, 1)
+            else:
+                suit_full = np.clip(weather.precipitation / 3000.0, 0, 1)
             cr, cc = suit_full.shape[0] // ds, suit_full.shape[1] // ds
             # Use actual suitability: a cell is hospitable if either species
             # could survive there.  We'll compute per-pair below.
