@@ -260,20 +260,10 @@ class Orchestrator:
             total_density = float(density.sum())
             occupied_cells = int((density > 0).sum())
 
-            # Mean biomass age over occupied cells
-            age_layer = f"biomass_age_{sid}"
-            if age_layer in ecology_layers:
-                age = store.read_layer("ecology", age_layer)
-                mask = density > 0
-                mean_age = float(age[mask].mean()) if mask.any() else 0.0
-            else:
-                mean_age = 0.0
-
             summaries.append({
                 "species_id": sid,
                 "total_density": total_density,
                 "occupied_cells": occupied_cells,
-                "mean_biomass_age": mean_age,
             })
 
         if summaries:
@@ -283,14 +273,7 @@ class Orchestrator:
         mean_temp = float(weather.temperature.mean())
         mean_precip = float(weather.precipitation.mean())
 
-        # Drought stress from ecology layer
-        if "drought_stress" in ecology_layers:
-            drought = store.read_layer("ecology", "drought_stress")
-            mean_drought = float(drought.mean())
-        else:
-            mean_drought = 0.0
-
-        events.write_tick_weather(tick, year, season, mean_temp, mean_precip, mean_drought)
+        events.write_tick_weather(tick, year, season, mean_temp, mean_precip, 0.0)
 
     def _write_derived_climate(
         self,

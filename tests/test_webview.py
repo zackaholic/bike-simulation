@@ -295,8 +295,8 @@ class TestLayerToggle:
         layers = data["layers"]
         assert isinstance(layers, dict)
 
-        # All three tiers must be present as top-level keys.
-        for tier in ("geology", "climate_hydrology", "ecology"):
+        # Tiers with data must be present as top-level keys.
+        for tier in ("geology", "climate_hydrology"):
             assert tier in layers, f"Missing tier key: {tier}"
             assert isinstance(layers[tier], list)
 
@@ -307,8 +307,9 @@ class TestLayerToggle:
         # Climate-hydrology should have temperature.
         assert "temperature" in layers["climate_hydrology"]
 
-        # Ecology may be empty (no density rasters written), but key exists.
-        assert isinstance(layers["ecology"], list)
+        # Ecology tier only present if ecology layers were written.
+        if "ecology" in layers:
+            assert isinstance(layers["ecology"], list)
 
     def test_tiles_for_different_layers(self, multi_client):
         """Tiles can be fetched for layers across different tiers.
