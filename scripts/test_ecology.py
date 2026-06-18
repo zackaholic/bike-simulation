@@ -294,12 +294,16 @@ def cmd_equilibrium(args):
         continentality=continentality,
     )
     # Generate summer weather as our static baseline (representative growing conditions)
-    static_weather = weather_sys.generate(tick_number=100, season=2)
+    static_weather = weather_sys.generate(year=25.0, season=2)
 
     print(f"Running to equilibrium (static weather, max {MAX_EQUILIBRIUM_YEARS}yr)...")
     print(f"  Stability: <{STABILITY_THRESHOLD*100:.0f}% change for {STABILITY_EPOCHS} consecutive {EPOCH_YEARS}yr epochs")
 
     eco = EcologyTier(world)
+    # Set version so raster writes work in versioned mode
+    next_version = world.current_version + 1
+    world.rasters.set_version(next_version)
+
     prev_densities: dict[str, float] = {}
     stable_count = 0
     history: list[dict] = []
@@ -313,11 +317,16 @@ def cmd_equilibrium(args):
             # Use static weather but vary season for fire/blowdown triggers
             tick = world.tier_clocks["ecology"].tick_number
             season = tick % 4
-            sw = weather_sys.generate(tick_number=tick, season=season)
+            sw = weather_sys.generate(year=tick * 0.25, season=season)
             # Override temperature and precipitation with static values
             sw.temperature = static_weather.temperature.copy()
             sw.precipitation = static_weather.precipitation.copy()
             eco.tick(sw)
+
+        # Snapshot version for this epoch
+        next_version += 1
+        world.rasters.set_version(next_version)
+        world.save(world_dir / "world.json")
 
         # Measure
         current_year = world.tier_clocks["ecology"].simulated_year
@@ -465,7 +474,7 @@ def cmd_perturb(args):
         moisture_bias=moisture_bias,
         continentality=continentality,
     )
-    static_weather = weather_sys.generate(tick_number=100, season=2)
+    static_weather = weather_sys.generate(year=25.0, season=2)
 
     # Apply climate perturbations to the static weather
     if args.temperature is not None:
@@ -519,6 +528,8 @@ def cmd_perturb(args):
 
     # Run to new equilibrium
     eco = EcologyTier(world)
+    next_version = world.current_version + 1
+    world.rasters.set_version(next_version)
     years = args.years or 500
     n_epochs = years // EPOCH_YEARS
 
@@ -537,7 +548,7 @@ def cmd_perturb(args):
         for _ in range(EPOCH_TICKS):
             tick = world.tier_clocks["ecology"].tick_number
             season = tick % 4
-            sw = weather_sys.generate(tick_number=tick, season=season)
+            sw = weather_sys.generate(year=tick * 0.25, season=season)
             sw.temperature = static_weather.temperature.copy()
             sw.precipitation = static_weather.precipitation.copy()
             eco.tick(sw)
