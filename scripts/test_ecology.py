@@ -146,22 +146,45 @@ def compute_species_summary(world: World) -> list[dict]:
 # Equilibrium detection
 # ---------------------------------------------------------------------------
 
-def check_stability(prev_densities: dict[str, float], curr_densities: dict[str, float]) -> tuple[bool, float]:
-    """Check if all species densities changed less than STABILITY_THRESHOLD.
+# Species below this fraction of total biomass are ignored by the stability
+# check — a tiny species swinging 200% on negligible absolute density is noise,
+# not a sign the world is still settling.
+STABILITY_MIN_BIOMASS_FRACTION = 0.001  # 0.1% of total biomass
 
-    Returns (is_stable, max_change_pct).
+
+def check_stability(
+    prev_densities: dict[str, float], curr_densities: dict[str, float]
+) -> tuple[bool, float, str | None]:
+    """Check if all meaningful species' densities changed less than the threshold.
+
+    Only species whose current density exceeds STABILITY_MIN_BIOMASS_FRACTION of
+    total biomass are considered, so negligible species reshuffling doesn't mask
+    aggregate convergence.
+
+    Returns (is_stable, max_change_pct, biggest_mover_id).
     """
     if not prev_densities:
-        return False, 1.0
+        return False, 1.0, None
+
+    total_biomass = sum(curr_densities.values())
+    if total_biomass <= 0:
+        return False, 1.0, None
+    min_density = total_biomass * STABILITY_MIN_BIOMASS_FRACTION
 
     max_change = 0.0
+    biggest_mover: str | None = None
     for sid, curr in curr_densities.items():
         prev = prev_densities.get(sid, 0.0)
-        if prev > 1.0:  # only check species with meaningful density
+        # Only meaningful species (above the biomass-fraction floor) count.
+        if curr < min_density and prev < min_density:
+            continue
+        if prev > 0.0:
             change = abs(curr - prev) / prev
-            max_change = max(max_change, change)
+            if change > max_change:
+                max_change = change
+                biggest_mover = sid
 
-    return max_change < STABILITY_THRESHOLD, max_change
+    return max_change < STABILITY_THRESHOLD, max_change, biggest_mover
 
 
 # ---------------------------------------------------------------------------
@@ -333,7 +356,7 @@ def cmd_equilibrium(args):
         species_summary = compute_species_summary(world)
         curr_densities = {s["species_id"]: s["total_density"] for s in species_summary}
 
-        is_stable, max_change = check_stability(prev_densities, curr_densities)
+        is_stable, max_change, mover = check_stability(prev_densities, curr_densities)
         elapsed = time.time() - epoch_start
 
         history.append({
@@ -341,14 +364,16 @@ def cmd_equilibrium(args):
             "densities": curr_densities,
             "max_change": round(max_change, 4),
             "stable": is_stable,
+            "biggest_mover": mover,
         })
 
         alive = len([s for s in species_summary if s["total_density"] > 1.0])
         total_biomass = sum(s["total_density"] for s in species_summary)
+        mover_str = mover.replace("anc_", "")[:18] if mover else "-"
 
         print(f"  Year {current_year:6.0f} | {alive} species | "
-              f"biomass {total_biomass:8.0f} | "
-              f"max Δ {max_change*100:5.1f}% | "
+              f"biomass {total_biomass:10.0f} | "
+              f"max Δ {max_change*100:5.1f}% ({mover_str}) | "
               f"{'STABLE' if is_stable else 'settling'} | "
               f"{elapsed:.0f}s")
 
@@ -557,7 +582,7 @@ def cmd_perturb(args):
         species_summary = compute_species_summary(world)
         curr_densities = {s["species_id"]: s["total_density"] for s in species_summary}
 
-        is_stable, max_change = check_stability(prev_densities, curr_densities)
+        is_stable, max_change, mover = check_stability(prev_densities, curr_densities)
         elapsed = time.time() - epoch_start
 
         epoch_years = (epoch + 1) * EPOCH_YEARS
@@ -567,14 +592,16 @@ def cmd_perturb(args):
             "densities": curr_densities,
             "max_change": round(max_change, 4),
             "stable": is_stable,
+            "biggest_mover": mover,
         })
 
         alive = len([s for s in species_summary if s["total_density"] > 1.0])
         total_biomass = sum(s["total_density"] for s in species_summary)
+        mover_str = mover.replace("anc_", "")[:18] if mover else "-"
 
         print(f"  +{epoch_years:4d}yr | {alive} species | "
-              f"biomass {total_biomass:8.0f} | "
-              f"max Δ {max_change*100:5.1f}% | "
+              f"biomass {total_biomass:10.0f} | "
+              f"max Δ {max_change*100:5.1f}% ({mover_str}) | "
               f"{'STABLE' if is_stable else 'settling'} | "
               f"{elapsed:.0f}s")
 
