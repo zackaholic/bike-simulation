@@ -33,6 +33,13 @@ PRECIP_REF_MAX = 3000.0  # mm
 TEMP_REF_MIN = -10.0     # °C
 TEMP_REF_MAX = 30.0      # °C
 
+# Baseline competition: how much functionally dissimilar species compete for
+# shared physical space. 0.0 = only similar species compete (uniform soup,
+# no biome structure); 1.0 = all species compete fully regardless of niche
+# (risk of global competitive exclusion / monoculture). This is the primary
+# knob for biome differentiation — tune via the equilibrium test.
+COMPETITION_BASELINE = 0.4
+
 # Core genome traits (6 traits, each maps to exactly one mechanism).
 _CORE_TRAITS = [
     "drought_tolerance", "frost_tolerance", "growth_rate",
@@ -677,9 +684,19 @@ class EcologyTier:
         """Lotka-Volterra competition coefficient from genome distance.
 
         alpha = 1.0 when distance = 0 (identical species compete fully).
-        alpha -> 0 as distance >> niche_width (different species barely compete).
+        alpha -> COMPETITION_BASELINE as distance grows (different species still
+        compete for shared physical space — light, water, ground — even when
+        functionally dissimilar).
+
+        The baseline is what makes competition a *spatial* limiter: without it,
+        a poorly-suited species in a cell ignores the well-suited species that
+        should exclude it, and every species survives everywhere (uniform soup).
+        With it, the species with the highest local K_eff (= K * suitability)
+        suppresses the others, so biome boundaries emerge where the suitability
+        ranking flips between species.
         """
-        return float(np.exp(-(distance / niche_width) ** 2))
+        niche_term = np.exp(-(distance / niche_width) ** 2)
+        return float(COMPETITION_BASELINE + (1.0 - COMPETITION_BASELINE) * niche_term)
 
     # ── fire disturbance ──────────────────────────────────────────
 
