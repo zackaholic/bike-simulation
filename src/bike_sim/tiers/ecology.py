@@ -609,11 +609,16 @@ class EcologyTier:
                 alpha = alphas[(sid, other)]
                 if alpha > 0.01:
                     effective_load += alpha * densities[other]
-            available = np.clip(K - effective_load, 0, None)
 
-            # Growth: positive, scales with suitability and available capacity
-            # growth_rate is per-year; 0.25 factor for seasonal tick
-            growth = density * genome["growth_rate"] * suit * (available / K) * 0.25
+            # Logistic growth with per-species carrying capacity set by suitability.
+            # K_eff = K * suit means the species saturates at density K*suit.
+            # The (K_eff - load)/K term goes NEGATIVE when overcrowded, providing
+            # the negative feedback that corrects overshoot — this is the corrective
+            # force that a clipped "available" term would silently discard.
+            # growth_rate is per-year; 0.25 factor for seasonal tick.
+            k_eff = K * suit
+            logistic = (k_eff - effective_load) / K
+            growth = density * genome["growth_rate"] * logistic * 0.25
 
             # Mortality: fixed base rate from lifespan (per seasonal tick)
             base_turnover = 1.0 / (genome["lifespan"] * float(self.TICKS_PER_YEAR))
