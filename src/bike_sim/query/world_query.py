@@ -203,7 +203,7 @@ class WorldQuery:
 
         # Layers available at this version, grouped by tier
         layers: dict[str, list[str]] = {}
-        for tier in ["geology", "climate_hydrology", "ecology"]:
+        for tier in self._world.rasters.list_tiers():
             layers[tier] = self._world.rasters.list_layers(tier, version=version)
 
         # Species alive at this version's year
@@ -235,7 +235,7 @@ class WorldQuery:
 
         # Sample all raster layers at this version
         rasters: dict[str, float] = {}
-        for tier in ["geology", "climate_hydrology", "ecology"]:
+        for tier in self._world.rasters.list_tiers():
             for layer_name in self._world.rasters.list_layers(tier, version=version):
                 data = self._world.rasters.read_layer(tier, layer_name, version=version)
                 col = _world_to_cell(x)

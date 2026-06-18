@@ -30,8 +30,8 @@ GRID_SIZE: int = 1000
 WORLD_EXTENT: float = CELL_SIZE * GRID_SIZE  # 50,000m
 
 # Path generation
-MAX_GRADE_PCT: float = 8.0       # reject edges steeper than 8%
-GRADE_COST_WEIGHT: float = 5.0   # cost multiplier for grade
+MAX_GRADE_PCT: float = 15.0      # reject edges steeper than 15%
+GRADE_COST_WEIGHT: float = 8.0   # cost multiplier for grade (strong preference for gentle)
 TURN_COST_WEIGHT: float = 2.0    # cost multiplier for heading change
 MIN_TURN_RADIUS_CELLS: int = 3   # ~150m minimum turn radius
 
@@ -102,7 +102,7 @@ def _astar_segment(
     heightmap: np.ndarray,
     start: tuple[int, int],
     goal: tuple[int, int],
-    max_steps: int = 500_000,
+    max_steps: int = 2_000_000,
 ) -> list[tuple[int, int]] | None:
     """A* pathfinding from start to goal on the heightmap grid.
 
@@ -624,8 +624,9 @@ def run_ride_experience(
     # Save path
     save_path(path, output_dir / "ride_path.json")
 
-    # Write path as raster layer
+    # Write path as raster layer at the current version so the webview can find it
     path_raster = rasterize_path(path)
+    world.rasters.set_version(world.current_version)
     world.rasters.write_layer("ride", "path_distance", path_raster, 0)
     print("  Path raster written to ride/path_distance layer")
 
