@@ -15,7 +15,7 @@ Inspirations: Dwarf Fortress (deep procedural history producing emergent meaning
 **Three simulation tiers with decoupled timescales.**
 1. **Geology**: bedrock, faults, soil parent material. Ticks every 10K-100K years. Largely static during normal play.
 2. **Climate-hydrology**: climate envelope, rivers (as a graph), watersheds, erosion, soil moisture. Ticks every 10-100 years. Contains a slow climate envelope and fast weather realizations sampled on demand.
-3. **Ecology**: species populations, distinguished individuals, disturbances, seed banks. Ticks every 1 season to a few years. Where the cyclist mostly lives.
+3. **Ecology**: species populations, distinguished individuals, disturbances. Ticks every season. Where the cyclist mostly lives.
 
 **Tiers communicate via events, not direct calls.** Slow tiers emit state changes downward; fast tiers emit events (fire happened here, beaver dam placed) upward, batched and applied at the slow tier's next tick.
 

@@ -2,6 +2,13 @@
 
 Build order is **bottom-up with cross-cutting infrastructure pulled forward**. The discipline is to have *visible feedback* available before there's anything real to look at, so each subsequent phase has immediate verification.
 
+> **Status note (June 2026):** Phases 0–8 are complete. The ecology built in
+> Phases 6–7 was substantially **rewritten** afterward (simpler unified tick,
+> 6-trait genome, no seed banks, baseline competition, deferred
+> extinction/speciation) — see `ecology-tick-refactor.md` and
+> `simulation-design.md` for the current design. The phase descriptions below
+> reflect the *original* build sequence, not the current ecology internals.
+
 ## Phase 0: Skeleton and decisions
 
 - Set up repo structure (see `architecture.md`).
@@ -59,7 +66,6 @@ Build order is **bottom-up with cross-cutting infrastructure pulled forward**. T
 - Establishment suitability (Liebig minimum).
 - Competition term.
 - Population dynamics: growth, mortality, dispersal.
-- Seed bank.
 - Simple succession.
 
 **Deferred to Phase 7**: speciation, distinguished individuals, disturbance.
