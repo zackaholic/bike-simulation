@@ -341,9 +341,6 @@ def cmd_equilibrium(args):
     print(f"  Extinction/speciation OFF, refugium floor {REFUGIUM_FLOOR}")
 
     eco = _configure_eco(EcologyTier(world))
-    # Set version so raster writes work in versioned mode
-    next_version = world.current_version + 1
-    world.rasters.set_version(next_version)
 
     prev_densities: dict[str, float] = {}
     stable_count = 0
@@ -354,6 +351,12 @@ def cmd_equilibrium(args):
     for epoch in range(MAX_EQUILIBRIUM_YEARS // EPOCH_YEARS):
         epoch_start = time.time()
 
+        # Direct raster writes to a fresh version for this epoch. set_version +
+        # commit_version must be paired so world.current_version (the manifest)
+        # advances in lockstep with the raster version groups — otherwise reads
+        # (which return the latest raster version) and writes diverge.
+        world.rasters.set_version(world.current_version + 1)
+
         for _ in range(EPOCH_TICKS):
             # Cycle the 4 fixed seasonal snapshots — same weather each year,
             # realistic within-year seasonal swing.
@@ -361,8 +364,7 @@ def cmd_equilibrium(args):
             eco.tick(static_seasons[tick % 4])
 
         # Snapshot version for this epoch
-        next_version += 1
-        world.rasters.set_version(next_version)
+        world.commit_version(trigger=f"equilibrium epoch {epoch}")
         world.save(world_dir / "world.json")
 
         # Measure
@@ -569,8 +571,6 @@ def cmd_perturb(args):
 
     # Run to new equilibrium
     eco = _configure_eco(EcologyTier(world))
-    next_version = world.current_version + 1
-    world.rasters.set_version(next_version)
     years = args.years or 500
     n_epochs = years // EPOCH_YEARS
 
@@ -586,9 +586,16 @@ def cmd_perturb(args):
     for epoch in range(n_epochs):
         epoch_start = time.time()
 
+        # Fresh version per epoch; set_version + commit_version paired so the
+        # manifest stays in sync with raster versions (see equilibrium note).
+        world.rasters.set_version(world.current_version + 1)
+
         for _ in range(EPOCH_TICKS):
             tick = world.tier_clocks["ecology"].tick_number
             eco.tick(static_seasons[tick % 4])
+
+        world.commit_version(trigger=f"perturb {perturb_name} epoch {epoch}")
+        world.save(world_dir / "world.json")
 
         current_year = world.tier_clocks["ecology"].simulated_year
         species_summary = compute_species_summary(world)
