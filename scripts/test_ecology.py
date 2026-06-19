@@ -61,9 +61,10 @@ REFUGIUM_FLOOR = 1.0
 
 
 def _configure_eco(eco):
-    """Configure an EcologyTier for testing: no extinction/speciation, refugium on."""
+    """Configure an EcologyTier for testing: no extinction/speciation/individuals, refugium on."""
     eco.enable_extinction = False
     eco.enable_speciation = False
+    eco.enable_individuals = False
     eco.refugium_floor = REFUGIUM_FLOOR
     return eco
 

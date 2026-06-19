@@ -378,6 +378,11 @@ class EcologyTier:
         # preserve prior behavior so existing tests are unaffected.
         self.enable_extinction = True
         self.enable_speciation = True
+        # Distinguished-individual promotion + lifecycle. Not part of the core
+        # grow/compete/disperse dynamics under test, adds SQLite overhead, and
+        # keys DI ids on tick number (which collides if ticks are ever re-run).
+        # Tests validating density dynamics disable it.
+        self.enable_individuals = True
         # Refugium floor: minimum total density a species retains, seeded into its
         # single most-suitable cell so it can wait out unfavorable phases and
         # rebound when conditions return. 0.0 = off. This is what lets wet
@@ -432,12 +437,13 @@ class EcologyTier:
         # Write all state
         self._write_species_state(species_list, densities, tick_num)
 
-        # Individual lifecycle (aging, death, post-mortem transitions)
-        self._update_individual_lifecycle(tick_num)
+        if self.enable_individuals:
+            # Individual lifecycle (aging, death, post-mortem transitions)
+            self._update_individual_lifecycle(tick_num)
 
-        # Promote individuals every 4 ticks (annually)
-        if tick_num % 4 == 0:
-            self._promote_individuals(tick_num)
+            # Promote individuals every 4 ticks (annually)
+            if tick_num % 4 == 0:
+                self._promote_individuals(tick_num)
 
         # Speciation check every 200 ticks (50 years)
         if self.enable_speciation and tick_num > 0 and tick_num % 200 == 0:
