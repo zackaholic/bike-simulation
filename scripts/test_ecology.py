@@ -316,10 +316,14 @@ def cmd_equilibrium(args):
         moisture_bias=moisture_bias,
         continentality=continentality,
     )
-    # Generate summer weather as our static baseline (representative growing conditions)
-    static_weather = weather_sys.generate(year=25.0, season=2)
+    # Four fixed seasonal snapshots at a reference year. We freeze the SLOW
+    # multi-year climate drift (so equilibrium is detectable) but keep the FAST
+    # seasonal cycle (so each species experiences the frost/drought extremes its
+    # niche is built around). Using a single season instead biases the
+    # equilibrium toward that season's specialists.
+    static_seasons = [weather_sys.generate(year=25.0, season=s) for s in range(4)]
 
-    print(f"Running to equilibrium (static weather, max {MAX_EQUILIBRIUM_YEARS}yr)...")
+    print(f"Running to equilibrium (frozen-drift seasonal cycle, max {MAX_EQUILIBRIUM_YEARS}yr)...")
     print(f"  Stability: <{STABILITY_THRESHOLD*100:.0f}% change for {STABILITY_EPOCHS} consecutive {EPOCH_YEARS}yr epochs")
 
     eco = EcologyTier(world)
@@ -337,14 +341,10 @@ def cmd_equilibrium(args):
         epoch_start = time.time()
 
         for _ in range(EPOCH_TICKS):
-            # Use static weather but vary season for fire/blowdown triggers
+            # Cycle the 4 fixed seasonal snapshots — same weather each year,
+            # realistic within-year seasonal swing.
             tick = world.tier_clocks["ecology"].tick_number
-            season = tick % 4
-            sw = weather_sys.generate(year=tick * 0.25, season=season)
-            # Override temperature and precipitation with static values
-            sw.temperature = static_weather.temperature.copy()
-            sw.precipitation = static_weather.precipitation.copy()
-            eco.tick(sw)
+            eco.tick(static_seasons[tick % 4])
 
         # Snapshot version for this epoch
         next_version += 1
@@ -499,15 +499,17 @@ def cmd_perturb(args):
         moisture_bias=moisture_bias,
         continentality=continentality,
     )
-    static_weather = weather_sys.generate(year=25.0, season=2)
+    # Four fixed seasonal snapshots (same frozen-drift seasonal cycle the
+    # equilibrium used), so the only change is the perturbation itself.
+    static_seasons = [weather_sys.generate(year=25.0, season=s) for s in range(4)]
 
-    # Apply climate perturbations to the static weather
+    # Apply climate perturbations to every season's weather
     if args.temperature is not None:
-        static_weather.temperature = static_weather.temperature + args.temperature
+        for sw in static_seasons:
+            sw.temperature = sw.temperature + args.temperature
     if args.precipitation is not None:
-        static_weather.precipitation = np.clip(
-            static_weather.precipitation + args.precipitation, 0, None
-        )
+        for sw in static_seasons:
+            sw.precipitation = np.clip(sw.precipitation + args.precipitation, 0, None)
 
     # Apply fire perturbation
     if args.fire:
@@ -572,11 +574,7 @@ def cmd_perturb(args):
 
         for _ in range(EPOCH_TICKS):
             tick = world.tier_clocks["ecology"].tick_number
-            season = tick % 4
-            sw = weather_sys.generate(year=tick * 0.25, season=season)
-            sw.temperature = static_weather.temperature.copy()
-            sw.precipitation = static_weather.precipitation.copy()
-            eco.tick(sw)
+            eco.tick(static_seasons[tick % 4])
 
         current_year = world.tier_clocks["ecology"].simulated_year
         species_summary = compute_species_summary(world)
