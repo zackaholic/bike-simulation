@@ -54,6 +54,19 @@ MIN_PERTURBATION_YEARS = 50
 GRID_SIZE = 1000
 CELL_SIZE = 50.0
 
+# Extinction and speciation are deferred; we test the fixed 14-species substrate.
+# The refugium floor keeps marginal species alive at trace density so they can
+# rebound under a favorable perturbation (the test we actually want to run).
+REFUGIUM_FLOOR = 1.0
+
+
+def _configure_eco(eco):
+    """Configure an EcologyTier for testing: no extinction/speciation, refugium on."""
+    eco.enable_extinction = False
+    eco.enable_speciation = False
+    eco.refugium_floor = REFUGIUM_FLOOR
+    return eco
+
 
 # ---------------------------------------------------------------------------
 # Strip sampling
@@ -325,8 +338,9 @@ def cmd_equilibrium(args):
 
     print(f"Running to equilibrium (frozen-drift seasonal cycle, max {MAX_EQUILIBRIUM_YEARS}yr)...")
     print(f"  Stability: <{STABILITY_THRESHOLD*100:.0f}% change for {STABILITY_EPOCHS} consecutive {EPOCH_YEARS}yr epochs")
+    print(f"  Extinction/speciation OFF, refugium floor {REFUGIUM_FLOOR}")
 
-    eco = EcologyTier(world)
+    eco = _configure_eco(EcologyTier(world))
     # Set version so raster writes work in versioned mode
     next_version = world.current_version + 1
     world.rasters.set_version(next_version)
@@ -554,7 +568,7 @@ def cmd_perturb(args):
             print(f"  Removed {sid}")
 
     # Run to new equilibrium
-    eco = EcologyTier(world)
+    eco = _configure_eco(EcologyTier(world))
     next_version = world.current_version + 1
     world.rasters.set_version(next_version)
     years = args.years or 500

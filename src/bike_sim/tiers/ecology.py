@@ -28,8 +28,16 @@ from bike_sim.world import World
 
 TIER = "ecology"
 
-# Absolute reference ranges for suitability normalization.
-PRECIP_REF_MAX = 3000.0  # mm
+# Absolute reference ranges for suitability normalization. These are LOCKED to
+# our world's actual climate envelope (seed-42 archetype) measured across a full
+# climate cycle (precip 344-2658mm, temp -5.4 to 21.1°C across 600yr x 4 seasons).
+# Fitting the references to the achievable envelope maps the genome distribution
+# onto conditions the world actually visits, so every species reaches strong
+# suitability at some phase of the cycle (wet specialists at the wet peak, dry at
+# the trough) rather than being permanently marginal. Fixed (not per-tick) so
+# temporal climate signal is preserved.
+PRECIP_REF_MIN = 350.0   # mm  (driest the world gets)
+PRECIP_REF_MAX = 2650.0  # mm  (wettest the world gets)
 TEMP_REF_MIN = -10.0     # °C
 TEMP_REF_MAX = 30.0      # °C
 
@@ -363,6 +371,18 @@ class EcologyTier:
 
     def __init__(self, world: World) -> None:
         self._world = world
+        # Mechanic toggles. Extinction and speciation are deferred to a dedicated
+        # design session — extinction without working speciation collapses the
+        # world to one species, and speciation itself is not yet reliable. Tests
+        # and runs that want a fixed 14-species substrate disable both. Defaults
+        # preserve prior behavior so existing tests are unaffected.
+        self.enable_extinction = True
+        self.enable_speciation = True
+        # Refugium floor: minimum total density a species retains, seeded into its
+        # single most-suitable cell so it can wait out unfavorable phases and
+        # rebound when conditions return. 0.0 = off. This is what lets wet
+        # specialists survive dry centuries (and vice versa) for full cyclic swings.
+        self.refugium_floor = 0.0
 
     # ── public API ─────────────────────────────────────────────────
 
@@ -400,8 +420,13 @@ class EcologyTier:
         if season == 3:
             self._blowdown_disturbance(weather, species_list, densities, tick_num)
 
+        # Refugium floor: keep a trace of each species alive in its best cell so
+        # it can rebound when its favorable phase returns.
+        if self.refugium_floor > 0.0:
+            self._apply_refugium_floor(weather, species_list, densities)
+
         # Check for species extinction
-        if tick_num > 0:
+        if self.enable_extinction and tick_num > 0:
             self._check_extinction(species_list, densities, tick_num)
 
         # Write all state
@@ -415,7 +440,7 @@ class EcologyTier:
             self._promote_individuals(tick_num)
 
         # Speciation check every 200 ticks (50 years)
-        if tick_num > 0 and tick_num % 200 == 0:
+        if self.enable_speciation and tick_num > 0 and tick_num % 200 == 0:
             self._check_speciation(tick_num, weather)
             self._check_reabsorption(tick_num, weather)
 
@@ -540,8 +565,12 @@ class EcologyTier:
         weather: SeasonalWeather,
     ) -> NDArray[np.float64]:
         """Absolute-normalized suitability from weather and genome traits."""
-        # Moisture axis
-        drought_stress = 1.0 - np.clip(weather.precipitation / PRECIP_REF_MAX, 0, 1)
+        # Moisture axis: two-parameter affine map onto the world's precip envelope.
+        precip_norm = np.clip(
+            (weather.precipitation - PRECIP_REF_MIN) / (PRECIP_REF_MAX - PRECIP_REF_MIN),
+            0, 1,
+        )
+        drought_stress = 1.0 - precip_norm
         suit = _gaussian_match(drought_stress, genome["drought_tolerance"], sigma=0.25)
 
         # Temperature axis
@@ -632,6 +661,33 @@ class EcologyTier:
             mortality = density * base_turnover
 
             densities[sid] = np.clip(density + growth - mortality, 0.0, None)
+
+    # ── refugium floor ────────────────────────────────────────────
+
+    def _apply_refugium_floor(
+        self,
+        weather: SeasonalWeather,
+        species_list: list,
+        densities: dict,
+    ) -> None:
+        """Guarantee each species a trace presence in its most-suitable cell.
+
+        If a species' total density falls below ``refugium_floor``, seed
+        ``refugium_floor`` density into the single cell where it is currently
+        best suited. This prevents a species from hitting unrecoverable zero
+        during an unfavorable phase, so it can rebound (and act as a dispersal
+        source) when its favorable conditions return.
+        """
+        for sp in species_list:
+            sid = sp["species_id"]
+            if float(densities[sid].sum()) >= self.refugium_floor:
+                continue
+            genome = self._world.events.get_species(sid)["genome"]
+            suit = self._compute_suitability(genome, weather)
+            best = np.unravel_index(int(np.argmax(suit)), suit.shape)
+            densities[sid][best] = max(
+                float(densities[sid][best]), self.refugium_floor
+            )
 
     # ── dispersal ─────────────────────────────────────────────────
 
