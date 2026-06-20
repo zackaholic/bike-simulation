@@ -1,0 +1,12 @@
+name: fire_wet_phase
+description: "Fire at the wet-climate peak (~yr 650, ~1700mm). Does the burn scar recruit a wetter/pioneer community while moisture is maximal, and does that community persist as the climate dries back?"
+weather_mode: cycling
+sustained: []
+shocks:
+  - type: fire
+    at_year: 650          # wet peak of this baseline's climate cycle
+    location: [500, 500]  # center, so the N-S / E-W strip transects cross the scar
+    radius: 150
+    kill: 0.9
+modifiers: []
+run_years: 1000

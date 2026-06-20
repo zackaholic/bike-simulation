@@ -1,0 +1,12 @@
+name: fire_dry_phase
+description: "Fire during the dry phase (~yr 50, ~1060mm). Drought-tolerant scrub/grass should seize the scar first; watch whether the later wet phase lets wetter species invade ground the dry pioneers already hold."
+weather_mode: cycling
+sustained: []
+shocks:
+  - type: fire
+    at_year: 50           # dry phase, early in the climate cycle
+    location: [500, 500]  # same disk as the wet-phase burn, for direct comparison
+    radius: 150
+    kill: 0.9
+modifiers: []
+run_years: 1000
