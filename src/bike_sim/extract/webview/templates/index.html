@@ -313,8 +313,6 @@
     for (var key in rasters) {
       var parts = key.split("/");
       var tier = parts[0], layer = parts.slice(1).join("/");
-      // Skip seed bank layers in the sidebar — they're internal simulation state.
-      if (layer.match(/^seed_bank/)) continue;
       if (!byTier[tier]) byTier[tier] = [];
       byTier[tier].push({ layer: layer, value: rasters[key] });
     }
@@ -548,8 +546,6 @@
     if (tier === "ride") return "Ride";
     if (tier === "ecology") {
       if (name.match(/^species_.*_density$/)) return "Species";
-      if (name.match(/^seed_bank/)) return null;    // skip
-      if (name.match(/^biomass_age_/)) return null;  // skip
       return "Ecology";
     }
     return "Ecology";  // fallback

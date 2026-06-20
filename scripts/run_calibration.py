@@ -142,10 +142,6 @@ def compute_epoch_diagnostics(world, prev_state, tick_start, tick_end):
         }
         species_diagnostics.append(sp_diag)
 
-    # --- Biotic pressure ---
-    pressures = events.get_biotic_pressures()
-    pressure_vals = list(pressures.values()) if pressures else [0.0]
-
     # --- Events this epoch (speciation, extinction, reabsorption) ---
     epoch_events = []
     for sp in species_list:
@@ -193,10 +189,6 @@ def compute_epoch_diagnostics(world, prev_state, tick_start, tick_end):
         "climate": climate,
         "species_count": {"alive": len(alive), "extinct": len(dead), "total": len(species_list)},
         "total_biomass": round(total_biomass, 1),
-        "pressure": {
-            "mean": round(sum(pressure_vals) / len(pressure_vals), 4),
-            "max": round(max(pressure_vals), 4),
-        },
         "species": species_diagnostics,
         "events": epoch_events,
         "top_movers": [

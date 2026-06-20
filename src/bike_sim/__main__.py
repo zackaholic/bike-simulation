@@ -54,8 +54,7 @@ def _cmd_advance(args: argparse.Namespace) -> None:
     world.save(world_dir / "world.json")
     print(f"Advanced {result['years_advanced']:.1f} years.")
     print(f"  Ecology ticks: {result['ecology_ticks']}")
-    print(f"  Climate ticks: {result['climate_hydrology_ticks']}")
-    print(f"  Geology ticks: {result['geology_ticks']}")
+    print(f"  Seasons advanced: {result['seasons_advanced']}")
     print(f"  Version: {world.current_version}")
     world.close()
 
@@ -75,8 +74,7 @@ def _cmd_ride(args: argparse.Namespace) -> None:
     world.save(world_dir / "world.json")
     print(f"Ride complete. Advanced {result['years_advanced']:.1f} sim-years.")
     print(f"  Ecology ticks: {result['ecology_ticks']}")
-    print(f"  Climate ticks: {result['climate_hydrology_ticks']}")
-    print(f"  Geology ticks: {result['geology_ticks']}")
+    print(f"  Seasons advanced: {result['seasons_advanced']}")
     print(f"  Version: {world.current_version}")
     world.close()
 
