@@ -566,19 +566,52 @@ def apply_shocks(world, densities, shocks, rng):
         SHOCK_REGISTRY[stype](world, densities, rng, shock)
 
 
+def _disk_mask(location, radius):
+    """Boolean mask of cells within ``radius`` of ``location`` (row, col)."""
+    r, c = location
+    y_coords, x_coords = np.ogrid[:GRID_SIZE, :GRID_SIZE]
+    return np.sqrt((y_coords - r) ** 2 + (x_coords - c) ** 2) <= radius
+
+
 @register_shock("fire")
 def _shock_fire(world, densities, rng, params):
     """Circular burn: multiply all species density by (1-kill) inside a disk."""
-    fire_r, fire_c = params["location"]
-    radius = params["radius"]
+    burned = _disk_mask(params["location"], params["radius"])
     kill = params["kill"]
-
-    y_coords, x_coords = np.ogrid[:GRID_SIZE, :GRID_SIZE]
-    dist = np.sqrt((y_coords - fire_r) ** 2 + (x_coords - fire_c) ** 2)
-    burned = dist <= radius
-
     for sid in densities:
         densities[sid][burned] *= (1.0 - kill)
+
+
+@register_shock("graded_burn")
+def _shock_graded_burn(world, densities, rng, params):
+    """Height-graded burn: different kill fractions for different stature tiers.
+
+    A fire (or any selective disturbance) that hits grasses harder than trees.
+    ``bands`` is a list of {height_below, kill}, evaluated in order — each
+    species takes the kill of the FIRST band whose ``height_below`` exceeds its
+    ``max_height``. Species above all bands are untouched. Optional location +
+    radius confine it to a disk; omit them to apply world-wide.
+
+      bands:
+        - {height_below: 1.0,  kill: 0.95}   # grasses / forbs
+        - {height_below: 10.0, kill: 0.6}    # shrubs
+        - {height_below: 1000, kill: 0.2}    # trees (catch-all)
+    """
+    bands = params["bands"]
+    if "location" in params and "radius" in params:
+        region = _disk_mask(params["location"], params["radius"])
+    else:
+        region = np.ones((GRID_SIZE, GRID_SIZE), dtype=bool)
+
+    for sid in densities:
+        max_height = world.events.get_species(sid)["genome"].get("max_height", 0.0)
+        kill = None
+        for band in bands:
+            if max_height < band["height_below"]:
+                kill = band["kill"]
+                break
+        if kill:
+            densities[sid][region] *= (1.0 - kill)
 
 
 @register_shock("flood")
