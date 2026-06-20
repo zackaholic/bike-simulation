@@ -20,10 +20,6 @@ EXPECTED_LAYERS = [
     "sediment_depth",
     "soil_moisture_summer",
     "soil_moisture_winter",
-    "frost_days",
-    "growing_degree_days",
-    "solar_insolation",
-    "distance_to_water",
 ]
 
 
@@ -221,35 +217,6 @@ def test_winter_moisture_gte_summer(geo_world):
         f"Winter mean moisture ({winter.mean():.3f}) should be >= "
         f"summer mean moisture ({summer.mean():.3f})"
     )
-
-
-def test_growing_degree_days_positive(geo_world):
-    """All growing degree day values should be >= 0."""
-    ClimateHydrologyTier(geo_world, erosion_params=FAST_PARAMS).tick()
-
-    gdd = geo_world.rasters.read_layer(TierId.CLIMATE_HYDROLOGY, "growing_degree_days")
-    assert np.all(np.isfinite(gdd))
-    assert gdd.min() >= 0.0, f"Minimum GDD is {gdd.min()}"
-
-
-def test_distance_to_water_nonnegative(geo_world):
-    """All distance-to-water values >= 0, and some cells should be 0 (water/river cells)."""
-    ClimateHydrologyTier(geo_world, erosion_params=FAST_PARAMS).tick()
-
-    dtw = geo_world.rasters.read_layer(TierId.CLIMATE_HYDROLOGY, "distance_to_water")
-    assert np.all(np.isfinite(dtw))
-    assert dtw.min() >= 0.0, f"Minimum distance_to_water is {dtw.min()}"
-    assert np.any(dtw == 0.0), "No cells have distance_to_water == 0 (expected some water cells)"
-
-
-def test_solar_insolation_range(geo_world):
-    """Solar insolation values should be in [0, 1]."""
-    ClimateHydrologyTier(geo_world, erosion_params=FAST_PARAMS).tick()
-
-    sol = geo_world.rasters.read_layer(TierId.CLIMATE_HYDROLOGY, "solar_insolation")
-    assert np.all(np.isfinite(sol))
-    assert sol.min() >= 0.0, f"solar_insolation min is {sol.min()}"
-    assert sol.max() <= 1.0, f"solar_insolation max is {sol.max()}"
 
 
 # ---------- Sediment / particle-erosion tests ----------

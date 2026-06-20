@@ -27,7 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-
+from numba import njit
 
 # ------------------------------------------------------------------
 # Configuration
@@ -69,6 +69,7 @@ BEDROCK_ERODIBILITY: dict[int, float] = {
 # Gradient helper
 # ------------------------------------------------------------------
 
+@njit(cache=True)
 def _compute_gradient_bilinear(
     heightmap: np.ndarray, sediment: np.ndarray, x: float, y: float,
 ) -> tuple[float, float]:
@@ -85,7 +86,7 @@ def _compute_gradient_bilinear(
     gradient points *uphill* (from low to high); the caller negates to
     move downhill.
 
-    Designed for future ``@numba.njit`` wrapping: only arrays and scalars.
+    JIT-compiled with ``@numba.njit``: only arrays and scalars.
     """
     rows, cols = heightmap.shape
 
@@ -116,6 +117,7 @@ def _compute_gradient_bilinear(
 # Particle simulation (numba-ready inner loop)
 # ------------------------------------------------------------------
 
+@njit(cache=True)
 def _simulate_particle(
     heightmap: np.ndarray,
     sediment: np.ndarray,
@@ -136,8 +138,9 @@ def _simulate_particle(
 
     Modifies *heightmap* and *sediment* **in-place**.
 
-    All parameters are numpy arrays or scalars — no Python objects — so this
-    function can later be wrapped with ``@numba.njit`` for a 50-100× speedup.
+    All parameters are numpy arrays or scalars — no Python objects — and the
+    function is wrapped with ``@numba.njit`` for a large speedup over the pure
+    Python particle loop.
     """
     rows, cols = heightmap.shape
 

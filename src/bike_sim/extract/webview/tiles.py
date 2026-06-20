@@ -115,12 +115,9 @@ _LAYER_LUTS: dict[str, np.ndarray] = {
     "temperature": _LUT_VIRIDIS,
     "precipitation": _LUT_BLUES,
     "flow_accumulation": _LUT_BLUES,
-    "solar_insolation": _LUT_VIRIDIS,
     "soil_moisture_summer": _LUT_BLUES,
     "soil_moisture_winter": _LUT_BLUES,
     "frost_pocket": _LUT_BLUES,
-    "growing_degree_days": _LUT_VIRIDIS,
-    "distance_to_water": _LUT_BLUES,
     "path_distance": _LUT_HOT,
 }
 
@@ -157,10 +154,6 @@ _LAYER_UNITS: dict[str, str] = {
     "flow_accumulation": "cells",
     "soil_moisture_summer": "",
     "soil_moisture_winter": "",
-    "frost_days": "days/yr",
-    "growing_degree_days": "°C·days",
-    "solar_insolation": "",
-    "distance_to_water": "m",
 }
 
 

@@ -39,10 +39,9 @@ TIER = "climate_hydrology"
 class ClimateHydrologyTier:
     """Climate-hydrology tier: climate envelope, hydrology, and derived cache.
 
-    Reads the geology heightmap and produces 11 raster layers per tick:
+    Reads the geology heightmap and produces 7 raster layers per tick:
     temperature, precipitation, flow_accumulation, eroded_heightmap,
-    sediment_depth, soil_moisture_summer, soil_moisture_winter, frost_days,
-    growing_degree_days, solar_insolation, distance_to_water.
+    sediment_depth, soil_moisture_summer, soil_moisture_winter.
     """
 
     GRID_SIZE: int = 1000
@@ -97,9 +96,9 @@ class ClimateHydrologyTier:
         combined_surface = eroded + sediment
         flow_acc = self._compute_flow_accumulation(combined_surface)
 
-        # 7. Derived-state cache (uses combined surface + post-erosion flow).
+        # 7. Soil-moisture cache (derived from combined surface + precipitation).
         self._compute_derived_cache(
-            combined_surface, sediment, temperature, precipitation, flow_acc, tick_num
+            combined_surface, sediment, precipitation, tick_num
         )
 
         # 8. Write layers.
@@ -281,18 +280,12 @@ class ClimateHydrologyTier:
         self,
         combined_surface: np.ndarray,
         sediment: np.ndarray,
-        temperature: np.ndarray,
         precipitation: np.ndarray,
-        flow_acc: np.ndarray,
         tick_number: int,
     ) -> None:
-        """Compute and write all derived-state layers for the ecology tier."""
+        """Compute and write the soil-moisture layers for the ecology tier."""
         rng = create_rng(self._world.seed, TIER, "derived", tick_number)
         store = self._world.rasters
-
-        # Water cells: top 0.5% of flow accumulation.
-        water_threshold = np.percentile(flow_acc, 99.5)
-        is_water = flow_acc >= water_threshold
 
         # --- Soil moisture (summer and winter) ---
         base_moisture = np.clip(precipitation / 2000.0, 0, 1)
@@ -315,28 +308,6 @@ class ClimateHydrologyTier:
         )
         store.write_layer(
             TIER, "soil_moisture_winter", winter_moisture.astype(np.float64), tick_number
-        )
-
-        # --- Frost days ---
-        frost_days = np.clip(365.0 * (1.0 - temperature / 20.0), 0, 365)
-        store.write_layer(TIER, "frost_days", frost_days.astype(np.float64), tick_number)
-
-        # --- Growing degree days ---
-        gdd = np.clip((temperature - 5.0) * 365.0 * 0.5, 0, None)
-        store.write_layer(TIER, "growing_degree_days", gdd.astype(np.float64), tick_number)
-
-        # --- Solar insolation ---
-        dy, dx = np.gradient(combined_surface, self.CELL_SIZE)
-        slope_angle = np.arctan(np.sqrt(dx**2 + dy**2))
-        aspect = np.arctan2(-dx, dy)
-        insolation = np.cos(slope_angle) * (0.5 + 0.5 * np.cos(aspect - np.pi))
-        insolation = np.clip(insolation, 0, 1)
-        store.write_layer(TIER, "solar_insolation", insolation.astype(np.float64), tick_number)
-
-        # --- Distance to water ---
-        distance_to_water = _distance_transform(is_water, self.CELL_SIZE)
-        store.write_layer(
-            TIER, "distance_to_water", distance_to_water.astype(np.float64), tick_number
         )
 
 
@@ -365,37 +336,3 @@ def _smooth(arr: np.ndarray, sigma: float = 1.0) -> np.ndarray:
     return result
 
 
-def _distance_transform(is_water: np.ndarray, cell_size: float) -> np.ndarray:
-    """Approximate Euclidean distance transform via vectorised Chamfer sweeps.
-
-    Uses cardinal and diagonal row/column sweeps — O(n) per sweep, vectorised
-    per row or column, so much faster than a cell-by-cell Python loop.
-    """
-    rows, cols = is_water.shape
-    INF = float(rows + cols) * cell_size
-    dist = np.where(is_water, 0.0, INF)
-
-    DIAG = cell_size * 1.414
-    CARD = cell_size
-
-    # Forward pass: top-to-bottom, left-to-right
-    for r in range(1, rows):
-        dist[r, :] = np.minimum(dist[r, :], dist[r - 1, :] + CARD)
-        # Diagonal from top-left
-        dist[r, 1:] = np.minimum(dist[r, 1:], dist[r - 1, :-1] + DIAG)
-        # Diagonal from top-right
-        dist[r, :-1] = np.minimum(dist[r, :-1], dist[r - 1, 1:] + DIAG)
-    for c in range(1, cols):
-        dist[:, c] = np.minimum(dist[:, c], dist[:, c - 1] + CARD)
-
-    # Backward pass: bottom-to-top, right-to-left
-    for r in range(rows - 2, -1, -1):
-        dist[r, :] = np.minimum(dist[r, :], dist[r + 1, :] + CARD)
-        # Diagonal from bottom-right
-        dist[r, :-1] = np.minimum(dist[r, :-1], dist[r + 1, 1:] + DIAG)
-        # Diagonal from bottom-left
-        dist[r, 1:] = np.minimum(dist[r, 1:], dist[r + 1, :-1] + DIAG)
-    for c in range(cols - 2, -1, -1):
-        dist[:, c] = np.minimum(dist[:, c], dist[:, c + 1] + CARD)
-
-    return dist

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.ndimage import convolve
 
 from bike_sim.rng import create_rng
 from bike_sim.weather import SeasonalWeather
@@ -236,11 +237,18 @@ def _gaussian_match(
     return np.exp(-0.5 * ((field - optimum) / sigma) ** 2)
 
 
-def _disperse(
-    density: NDArray[np.float64],
-    radius: int = 1,
-) -> NDArray[np.float64]:
-    """Spread *density* to neighbours using a distance-weighted kernel."""
+_DISPERSAL_KERNELS: dict[int, NDArray[np.float64]] = {}
+
+
+def _dispersal_kernel(radius: int) -> NDArray[np.float64]:
+    """Distance-weighted, sum-normalised dispersal kernel for *radius*.
+
+    Cached per radius — the kernel depends only on radius, not on density,
+    so it is built once and reused across species and ticks.
+    """
+    cached = _DISPERSAL_KERNELS.get(radius)
+    if cached is not None:
+        return cached
     kernel_size = 2 * radius + 1
     kernel = np.zeros((kernel_size, kernel_size), dtype=np.float64)
     center = radius
@@ -250,14 +258,22 @@ def _disperse(
             if dist <= radius:
                 kernel[i, j] = 1.0 / (1.0 + dist)
     kernel /= kernel.sum()
+    _DISPERSAL_KERNELS[radius] = kernel
+    return kernel
 
-    n = density.shape[0]
-    padded = np.pad(density, radius, mode="constant", constant_values=0)
-    result = np.zeros_like(density)
-    for i in range(kernel_size):
-        for j in range(kernel_size):
-            result += kernel[i, j] * padded[i : i + n, j : j + n]
-    return result
+
+def _disperse(
+    density: NDArray[np.float64],
+    radius: int = 1,
+) -> NDArray[np.float64]:
+    """Spread *density* to neighbours using a distance-weighted kernel.
+
+    Equivalent to correlating *density* with a radial kernel and zero-padding
+    the borders. Implemented via ``scipy.ndimage.convolve`` (optimised C) — the
+    kernel is symmetric, so convolution and correlation coincide.
+    """
+    kernel = _dispersal_kernel(radius)
+    return convolve(density, kernel, mode="constant", cval=0.0)
 
 
 def _bfs_label(mask: NDArray[np.bool_]) -> NDArray[np.int32]:
