@@ -26,3 +26,4 @@ worlds/
 
 # Pytest
 .pytest_cache/
+results/

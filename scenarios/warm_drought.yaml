@@ -1,0 +1,8 @@
+name: warm_drought
+description: "Sustained 5C warming plus a 400mm precipitation drought."
+weather_mode: frozen
+sustained:
+  - {field: temperature, op: add, value: 5}
+  - {field: precipitation, op: add, value: -400}
+shocks: []
+run_years: 500
