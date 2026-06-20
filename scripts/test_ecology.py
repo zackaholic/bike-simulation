@@ -484,8 +484,10 @@ class Scenario:
 
     - sustained: list of {field, op, value} weather modifications applied to
       EVERY tick's weather (e.g. a permanent +5°C shift).
-    - shocks: list of {type, ...params} one-time disturbances applied to the
-      density rasters at t=0 (dispatched through the shock registry).
+    - shocks: list of {type, ...params} one-time disturbances dispatched through
+      the shock registry. Applied at t=0 by default, or at a scenario-relative
+      year via an optional ``at_year`` (e.g. a fire during a specific climate
+      phase under cycling weather).
     - modifiers: list of {mechanism, multiplier, start_year, end_year, ...}
       time-bounded multipliers on tick mechanisms (growth/mortality/dispersal/
       carrying_capacity) for targeted species — blights, plagues, sterility,
@@ -680,6 +682,22 @@ def apply_shocks(world, densities, shocks, rng):
                 f"(registered: {sorted(SHOCK_REGISTRY)})"
             )
         SHOCK_REGISTRY[stype](world, densities, rng, shock)
+
+
+def partition_shocks(shocks):
+    """Split shocks into (immediate, timed) by their optional ``at_year``.
+
+    A shock with no ``at_year`` (or ``at_year`` == 0) fires at t=0, before the
+    run. A shock with ``at_year`` > 0 fires once when the run first reaches that
+    scenario-relative year — e.g. a fire during a specific climate phase. The
+    timed list is returned sorted by ``at_year``.
+    """
+    immediate = [s for s in shocks if not s.get("at_year")]
+    timed = sorted(
+        (s for s in shocks if s.get("at_year")),
+        key=lambda s: s["at_year"],
+    )
+    return immediate, timed
 
 
 def _disk_mask(location, radius):
@@ -1385,13 +1403,16 @@ def run_scenario(scenario, baseline_dir, results_root, keep=False):
     # Build weather (frozen seasons or live cycle) with sustained mods baked in.
     weather_for_tick = build_weather_for_tick(world, scenario)
 
-    # Apply one-time shocks to the density rasters at t=0.
-    if scenario.shocks:
+    # Shocks split into immediate (t=0) and timed (fire mid-run at at_year).
+    immediate_shocks, timed_shocks = partition_shocks(scenario.shocks)
+
+    # Apply immediate shocks to the density rasters at t=0.
+    if immediate_shocks:
         rng = create_rng(world.seed, "test", "scenario_shocks", 0)
         densities = load_all_densities(world)
-        apply_shocks(world, densities, scenario.shocks, rng)
+        apply_shocks(world, densities, immediate_shocks, rng)
         write_densities(world, densities)
-        print(f"  Applied {len(scenario.shocks)} shock(s) at t=0")
+        print(f"  Applied {len(immediate_shocks)} shock(s) at t=0")
 
     # Run. For cycling runs, snapshot strips each epoch so the biome migration
     # over the climate cycle can be seen as a time sequence (amplitude + phase),
@@ -1406,16 +1427,37 @@ def run_scenario(scenario, baseline_dir, results_root, keep=False):
 
     eco = _configure_eco(EcologyTier(world))
 
-    # Time-bounded mechanism modifiers (blights etc.): resolve and push onto the
-    # tier before each tick. No-op when the scenario declares no modifiers.
+    # Per-tick hook: (1) push time-bounded mechanism modifiers (blights etc.)
+    # onto the tier, (2) fire timed shocks when the run reaches their at_year.
+    # Both are no-ops when the scenario declares none. Timed shocks mutate the
+    # density layers in place at the epoch's current raster version (the same
+    # version eco.tick writes to), so no extra set/commit is needed.
     pre_tick = None
-    if scenario.modifiers:
+    if scenario.modifiers or timed_shocks:
+        shock_rng = create_rng(world.seed, "test", "timed_shocks", 0)
+        fired: set[int] = set()
+
         def pre_tick(tick):
             rel_year = world.tier_clocks["ecology"].simulated_year - start_year
-            eco.set_mechanism_modifiers(
-                resolve_modifiers(world, scenario.modifiers, rel_year)
-            )
-        print(f"  {len(scenario.modifiers)} modifier(s) armed")
+            if scenario.modifiers:
+                eco.set_mechanism_modifiers(
+                    resolve_modifiers(world, scenario.modifiers, rel_year)
+                )
+            for i, shock in enumerate(timed_shocks):
+                if i not in fired and rel_year >= shock["at_year"]:
+                    densities = load_all_densities(world)
+                    apply_shocks(world, densities, [shock], shock_rng)
+                    for sid, arr in densities.items():
+                        world.rasters.write_layer(
+                            "ecology", f"species_{sid}_density", arr, tick
+                        )
+                    fired.add(i)
+                    print(f"  shock '{shock['type']}' fired at +{rel_year:.0f}yr")
+
+        if scenario.modifiers:
+            print(f"  {len(scenario.modifiers)} modifier(s) armed")
+        if timed_shocks:
+            print(f"  {len(timed_shocks)} timed shock(s) armed")
 
     n_epochs = scenario.run_years // EPOCH_YEARS
     print(f"\nRunning {scenario.run_years}yr...")
@@ -1464,6 +1506,11 @@ def run_scenario(scenario, baseline_dir, results_root, keep=False):
         "species_before": eq_result["species"],
         "species_after": after_summary,
         "species_deltas": deltas,
+        # Per-epoch trajectory: for modifier/blight runs the transient (the dip
+        # and recovery) is the whole point, and the before/after endpoints hide
+        # it under the single-attractor return. Persist the history so it's
+        # inspectable without re-running.
+        "history": history,
         "runtime_seconds": round(total_time, 1),
     }
     (out_dir / "result.json").write_text(json.dumps(result, indent=2))

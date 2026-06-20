@@ -245,6 +245,29 @@ class TestResolver:
         assert resolved[sid]["growth"] == pytest.approx(0.25)
 
 
+class TestPartitionShocks:
+    def test_no_at_year_is_immediate(self, harness):
+        shocks = [{"type": "fire"}, {"type": "flood"}]
+        immediate, timed = harness.partition_shocks(shocks)
+        assert immediate == shocks
+        assert timed == []
+
+    def test_at_year_zero_is_immediate(self, harness):
+        shocks = [{"type": "fire", "at_year": 0}]
+        immediate, timed = harness.partition_shocks(shocks)
+        assert len(immediate) == 1 and timed == []
+
+    def test_timed_partitioned_and_sorted(self, harness):
+        shocks = [
+            {"type": "a", "at_year": 200},
+            {"type": "b"},
+            {"type": "c", "at_year": 50},
+        ]
+        immediate, timed = harness.partition_shocks(shocks)
+        assert [s["type"] for s in immediate] == ["b"]
+        assert [s["at_year"] for s in timed] == [50, 200]
+
+
 class TestScenarioValidation:
     def test_bad_mechanism_rejected(self, harness, tmp_path):
         bad = tmp_path / "bad.yaml"
