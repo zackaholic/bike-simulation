@@ -120,6 +120,8 @@ class WeatherSystem:
         geology_heightmap: np.ndarray,
         grid_size: int = 1000,
         cell_size: float = 50.0,
+        moisture_bias: np.ndarray | None = None,
+        continentality: np.ndarray | None = None,
     ) -> None:
         self._world_seed = world_seed
         self.grid_size = grid_size
@@ -127,9 +129,9 @@ class WeatherSystem:
 
         # Fractal noise parameters
         self._num_octaves = 7
-        self._base_freq = 1.0 / 800.0   # lowest octave wavelength ~800 years
+        self._base_freq = 1.0 / 300.0   # lowest octave wavelength ~300 years
         self._lacunarity = 2.0           # each octave doubles in frequency
-        self._persistence = 0.55         # each octave has 55% of previous amplitude
+        self._persistence = 0.7          # each octave has 70% of previous amplitude
         self._base_amp_temp = 3.0        # lowest octave: ±3°C
         self._base_amp_precip = 0.15     # lowest octave: ±15% precip (log space)
 
@@ -137,6 +139,10 @@ class WeatherSystem:
         rng = create_rng(world_seed, "weather", "fractal", 0)
         self._seed_temp = int(rng.integers(0, 2**31))
         self._seed_precip = int(rng.integers(0, 2**31))
+
+        # Spatial climate bias fields (None = no spatial variation, backward compat)
+        self._moisture_bias = moisture_bias     # [0.5, 2.0] multiplicative
+        self._continentality = continentality   # [0.0, 1.0] temp extreme scaling
 
         self._base_temp, self._base_precip = self._compute_base_climate(
             geology_heightmap
@@ -175,7 +181,15 @@ class WeatherSystem:
         # Seasonal modulation of base, then anomaly with valley amplification.
         temperature = self._base_temp * temp_scale
         valley_amplifier = 1.0 + self._valley_depth * 0.3
-        temperature = temperature + temp_anomaly * valley_amplifier
+
+        # Continentality scales temperature anomaly extremes:
+        # high continentality = full anomaly effect (continental climate)
+        # low continentality = dampened anomaly (maritime climate)
+        if self._continentality is not None:
+            anomaly_scale = 0.7 + 0.6 * self._continentality
+            temperature = temperature + temp_anomaly * valley_amplifier * anomaly_scale
+        else:
+            temperature = temperature + temp_anomaly * valley_amplifier
 
         # --- Precipitation ---
         # Seasonal modulation of base, then multiplicative anomaly with
@@ -193,6 +207,11 @@ class WeatherSystem:
         spatial_multiplier = spatial_multiplier * (1.0 - lee_mask * 0.3)
 
         precipitation = base_p * spatial_multiplier
+
+        # Apply moisture bias: structurally wetter/drier regions
+        if self._moisture_bias is not None:
+            precipitation = precipitation * self._moisture_bias
+
         precipitation = np.clip(precipitation, 0, None)
 
         # --- Frost severity ---

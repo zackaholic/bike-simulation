@@ -639,3 +639,70 @@ Compare v5 (no barrier check): 89 species at year 1050, 67 herbs, accelerating s
 - **R5 (discrete climate catastrophe events)**: The existing frost kill, drought mortality, and spring frost damage mechanics should produce visible events naturally once sensitivity is high enough. Adding a separate event system would be artificial.
 
 **Design principle**: These fixes unblock existing mechanisms rather than adding new ones. The climate system, terrain modulation, suitability computation, and biotic pressure were all correctly designed — they just had parameter/baseline choices that independently suppressed the signal at each stage.
+
+## Two-layer ecology and spatial climate variation (2026-06-15)
+
+**Context**: Calibration v9 (4000 years) revealed that while climate-ecology coupling was working (genuine boom-bust cycles), the world was almost completely empty. Dense pockets of vegetation in a mostly barren landscape. The colonization model — 6 point-source species expanding via dispersal — could never fill a world because suitability filtering kills propagules faster than dispersal establishes them. Real Earth had billions of years for colonization; simulating thousands and wondering why it's empty is a structural mismatch.
+
+Additionally, the world lacked spatial climate variation beyond elevation. Every valley felt the same. Climate cycles shifted all cells uniformly, preventing range migration and the compelling narratives (species bridging barriers, getting cleaved by returning deserts) that make worlds feel alive.
+
+### Decision: Spatial climate bias fields
+
+**Decision**: Generate two static 2D noise fields at world creation — moisture_bias [0.5, 2.0] and continentality [0.0, 1.0]. These multiply/scale the dynamic weather output spatially. Moisture_bias correlates with elevation (lower = wetter) for natural rain shadow effects.
+
+**Why**: Creates distinct wet/dry and maritime/continental regions without hard biome boundaries. The fields are continuous, so region borders are fuzzy ecotones that shift with global climate cycles. During a wet period, dry-biased areas may become temporarily habitable; during drought, they become barriers. This enables the desert-bridge narrative to emerge from rules rather than being scripted.
+
+**R2 revisited**: The earlier audit rejected spatial noise because "terrain already provides differentiation." Extended calibration proved this insufficient — terrain modulates climate but doesn't create the distinct regional character needed for a BotW-like landscape. The spatial bias fields are not artificial noise added to existing signals; they represent real geographic features (distance from coast, mountain sheltering, prevailing wind effects) that the simplified terrain model doesn't capture.
+
+### Decision: Two-layer ecology (ground cover + canopy)
+
+**Decision**: Split ecology into two layers. Ground cover (grass, moss, lichen, bare soil) is computed directly from current weather conditions — always present, changes with seasons, zero simulation cost. Canopy (trees, shrubs, structural plants) is the existing competitive ecology with dispersal, speciation, and population dynamics.
+
+**Why**: The world must never be empty — every cell needs vegetation for visual quality. Making ground cover a simulation output that can be zero created a problem that didn't need to exist. Ground cover in real ecosystems is a fast-responding function of conditions, not a dispersal-limited population. Separating it from canopy ecology lets us guarantee full coverage while preserving the interesting dynamics for structural plants.
+
+**Rendering alignment**: Ground cover is a texture (free). Canopy is geometry (expensive). The simulation should match the rendering cost model.
+
+### Decision: 14 ancestral species with broad placement (replacing 6 point-sources)
+
+**Decision**: Expanded from 6 to 14 ancestors across 4 structural roles: 3 canopy trees, 2 understory trees, 4 tall shrubs, 5 low shrubs/forbs. Species are placed broadly at creation using suitability × species-specific noise, not from point sources.
+
+**Why**: With 6 point-sources, the world started empty and required thousands of simulated years to fill — which it never fully did because suitability filtering prevented colonization of marginal habitat. With 14 species scattered across suitable habitat, the world starts 100% covered. Structural roles ensure different rendering costs and ecological strategies coexist. Species-specific noise creates natural clustering (groves, patches) without placement.
+
+**"Generation = advancement" preserved**: The same dispersal/competition rules apply during both world creation settling and ride-time play. The broad initial scatter is the equivalent of saying "this world has been inhabited for millions of years." The settling period lets competition sort out overlaps, producing a world that's near equilibrium but with enough roughness for the rider to witness ongoing dynamics.
+
+### Decision: Speciation as rare narrative event (not niche-filling mechanism)
+
+**Decision**: Speciation is now rarer (~500yr average), more dramatic, and role-dependent. Cooldown raised from 100yr to 300yr. Base probability 0.15 → 0.08. Trees speciate at 2x rate, herbs at 0.5x. Morphological drift increased (σ 0.15 → 0.25) so daughter species are visibly distinct.
+
+**Why**: In the old model, speciation was load-bearing infrastructure — the only way to fill niches. With broad placement and 14 ancestors, that function is no longer needed. Speciation becomes a world event the rider might witness over months of riding: "there's a new kind of tree on the far side of that ridge." Trees speciate most readily because their heavy seeds can't bridge barriers; herbs rarely speciate because wind dispersal maintains gene flow.
+
+### Decision: Deterministic ghost species extinction
+
+**Decision**: Species with zero density AND zero seed bank are immediately marked extinct, rather than relying on probabilistic MVP checks.
+
+**Why**: v9 calibration showed 8 "alive" species with zero density — ghosts that survived probabilistic extinction checks indefinitely. Species that are truly gone should be formally marked extinct.
+
+### Full design document
+
+See `docs/ground-cover-and-spatial-climate.md` for the complete design including implementation phases, open questions, and rendering considerations.
+
+---
+
+## R2026-06-16 — Weather cycle tuning, DI filter, ride experience tool
+
+### Precipitation cycle period: 800yr → 300yr
+**Decision**: Shorten `_base_freq` from 1/800 to 1/300, increase `_persistence` from 0.55 to 0.7.
+
+**Why**: The 800-year base period was hardcoded (not seed-dependent), meaning 1000-year calibration runs only captured 1.25 cycles of the dominant mode. Precipitation appeared static. At 300yr, runs see 3+ complete cycles and shorter octaves (100yr, 50yr) contribute more relative variation due to the higher persistence.
+
+### DI promotion limited to trees only
+**Decision**: Only growth_form==0 (trees) are promoted to distinguished individual status. Shrubs, forbs, and grasses skip promotion entirely.
+
+**Why**: With 14 species and 2–5 promotions per species per year, the system generated 30–90 DIs/year — too many, and narratively meaningless for small plants. Trees are the species the rider notices and grows attached to. This cuts DI volume by ~60% and keeps the DI system narratively focused.
+
+### Ride experience tool
+**Decision**: New `ride-experience` CLI command and extract module that generates a bike path through the world and samples species density along perpendicular cross-sections.
+
+**Why**: With the simulation approaching a rideable state, we need a renderer-agnostic way to evaluate the rider experience — whether species distributions create interesting transitions, whether terrain grade is rideable, whether the world feels inhabited. The perpendicular bar sampling (±50m, every 50m of path distance) avoids POV-turning artifacts that a cone would introduce. Distance-based snapshots (not time-based) ensure consistent spatial resolution regardless of riding speed or turn radius.
+
+**Implementation**: A* pathfinding on grade cost surface connecting well-spread waypoints (farthest-point sampling). Path stored as a raster layer for webview display. Experience graph shows elevation/grade, species density, and ground cover along ride distance.

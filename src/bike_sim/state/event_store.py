@@ -296,17 +296,17 @@ class EventStore:
         """Batch-insert per-species summary rows for a single tick.
 
         Each dict in *species_summaries* must have keys:
-        species_id, total_density, occupied_cells, mean_biomass_age.
+        species_id, total_density, occupied_cells.
         """
         rows = [
             (tick, year, season, s["species_id"], s["total_density"],
-             s["occupied_cells"], s["mean_biomass_age"])
+             s["occupied_cells"])
             for s in species_summaries
         ]
         self._conn.executemany(
             """INSERT OR REPLACE INTO tick_summary
-               (tick, year, season, species_id, total_density, occupied_cells, mean_biomass_age)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               (tick, year, season, species_id, total_density, occupied_cells)
+               VALUES (?, ?, ?, ?, ?, ?)""",
             rows,
         )
         self._conn.commit()
@@ -360,7 +360,6 @@ class EventStore:
                 "species_id": row["species_id"],
                 "total_density": row["total_density"],
                 "occupied_cells": row["occupied_cells"],
-                "mean_biomass_age": row["mean_biomass_age"],
             }
             for row in rows
         ]
@@ -444,7 +443,6 @@ class EventStore:
                 species_id  TEXT NOT NULL,
                 total_density REAL NOT NULL,
                 occupied_cells INTEGER NOT NULL,
-                mean_biomass_age REAL NOT NULL,
                 PRIMARY KEY (tick, species_id)
             );
             CREATE INDEX IF NOT EXISTS idx_tick_summary_species
@@ -487,7 +485,6 @@ class EventStore:
                 species_id  TEXT NOT NULL,
                 total_density REAL NOT NULL,
                 occupied_cells INTEGER NOT NULL,
-                mean_biomass_age REAL NOT NULL,
                 PRIMARY KEY (tick, species_id)
             );
             CREATE INDEX IF NOT EXISTS idx_tick_summary_species

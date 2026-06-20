@@ -30,8 +30,8 @@ class TestEventStoreSummary:
 
     def test_write_and_read_tick_summary(self, store):
         summaries = [
-            {"species_id": "sp_a", "total_density": 100.5, "occupied_cells": 42, "mean_biomass_age": 3.2},
-            {"species_id": "sp_b", "total_density": 50.0, "occupied_cells": 20, "mean_biomass_age": 1.0},
+            {"species_id": "sp_a", "total_density": 100.5, "occupied_cells": 42},
+            {"species_id": "sp_b", "total_density": 50.0, "occupied_cells": 20},
         ]
         store.write_tick_summary(tick=4, year=1.0, season=0, species_summaries=summaries)
 
@@ -53,11 +53,11 @@ class TestEventStoreSummary:
 
     def test_filter_by_species(self, store):
         store.write_tick_summary(tick=4, year=1.0, season=0, species_summaries=[
-            {"species_id": "sp_a", "total_density": 10, "occupied_cells": 5, "mean_biomass_age": 1},
-            {"species_id": "sp_b", "total_density": 20, "occupied_cells": 8, "mean_biomass_age": 2},
+            {"species_id": "sp_a", "total_density": 10, "occupied_cells": 5},
+            {"species_id": "sp_b", "total_density": 20, "occupied_cells": 8},
         ])
         store.write_tick_summary(tick=8, year=2.0, season=0, species_summaries=[
-            {"species_id": "sp_a", "total_density": 15, "occupied_cells": 6, "mean_biomass_age": 1.5},
+            {"species_id": "sp_a", "total_density": 15, "occupied_cells": 6},
         ])
         rows = store.get_tick_summaries(species_id="sp_a")
         assert len(rows) == 2
@@ -66,7 +66,7 @@ class TestEventStoreSummary:
     def test_filter_by_tick_range(self, store):
         for tick in [4, 8, 12, 16]:
             store.write_tick_summary(tick=tick, year=tick * 0.25, season=0, species_summaries=[
-                {"species_id": "sp_a", "total_density": tick, "occupied_cells": 1, "mean_biomass_age": 0},
+                {"species_id": "sp_a", "total_density": tick, "occupied_cells": 1},
             ])
         rows = store.get_tick_summaries(tick_start=8, tick_end=12)
         assert len(rows) == 2
@@ -82,10 +82,10 @@ class TestEventStoreSummary:
     def test_upsert_on_duplicate(self, store):
         """write_tick_summary uses INSERT OR REPLACE, so re-writing the same tick+species overwrites."""
         store.write_tick_summary(tick=4, year=1.0, season=0, species_summaries=[
-            {"species_id": "sp_a", "total_density": 10, "occupied_cells": 5, "mean_biomass_age": 1},
+            {"species_id": "sp_a", "total_density": 10, "occupied_cells": 5},
         ])
         store.write_tick_summary(tick=4, year=1.0, season=0, species_summaries=[
-            {"species_id": "sp_a", "total_density": 99, "occupied_cells": 50, "mean_biomass_age": 9},
+            {"species_id": "sp_a", "total_density": 99, "occupied_cells": 50},
         ])
         rows = store.get_tick_summaries()
         assert len(rows) == 1
@@ -188,7 +188,6 @@ def test_summaries_have_species_data(ready_world):
     for s in summaries:
         assert s["total_density"] >= 0
         assert s["occupied_cells"] >= 0
-        assert s["mean_biomass_age"] >= 0
         assert isinstance(s["species_id"], str)
 
 

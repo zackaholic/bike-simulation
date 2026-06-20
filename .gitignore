@@ -22,6 +22,8 @@ Thumbs.db
 # Project data (generated worlds, extracted output)
 data/
 output/
+worlds/
 
 # Pytest
 .pytest_cache/
+results/

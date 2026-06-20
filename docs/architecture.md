@@ -19,10 +19,11 @@ This document captures the design decisions made during initial planning. The *w
 - **Key insight**: contains a slow *climate envelope* (centuries-scale drift) and produces *weather realizations* on demand (sampled from envelope, possibly cached). This means we don't need a separate weather tier.
 
 ### Tier 3: Ecology
-- **Timestep**: 1 season to a few years per tick
-- **State**: species (genome + range + history), distinguished individuals, seed banks, disturbance events
-- **Representation**: species density fields at 50m; distinguished individuals as point data with full records; seed bank as sparse {species: density} maps per soil cell
+- **Timestep**: 1 season per tick (4 ticks/year)
+- **State**: species (6-trait genome + range + history), distinguished individuals, disturbance events
+- **Representation**: species density fields at 50m; distinguished individuals as point data with full records
 - **Frequency**: Ticked on every ride-log advance, multiple times per advance
+- **Note**: the ecology tick was rewritten (June 2026) to a single unified grow/compete/disperse rule; see `simulation-design.md` and `ecology-tick-refactor.md`. Seed banks were removed in favor of dispersal + a refugium floor.
 
 ## Tier communication
 

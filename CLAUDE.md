@@ -8,8 +8,9 @@ Before starting any task, read in this order:
 1. `README.md` — emotional core, architectural commitments
 2. `docs/architecture.md` — tier structure, data layers, reproducibility model
 3. `docs/simulation-design.md` — what each tier actually does
-4. `docs/roadmap.md` — phase-by-phase build sequence
-5. `docs/decisions.md` if it exists — incremental decisions since initial planning
+4. `docs/ecology-tick-refactor.md` — current ecology design (supersedes the older ecology in roadmap Phases 6–7)
+5. `docs/roadmap.md` — phase-by-phase build sequence (original plan; ecology since revised)
+6. `docs/decisions.md` if it exists — incremental decisions since initial planning
 
 ## Core architectural commitments — don't violate without discussion
 
@@ -49,35 +50,29 @@ If a request seems to require violating any of these, raise it explicitly rather
 
 ## Where we are right now
 
-Phases 0 through 8 are complete. The simulation is end-to-end functional.
+Phases 0–8 are complete (full infrastructure + all three tiers + orchestrator/CLI). The **ecology tier was then substantially rewritten** (June 2026) and is the current focus. Read `docs/ecology-tick-refactor.md` and the Ecology section of `docs/simulation-design.md` for the current design — the older "Phase 6/7" ecology is superseded.
 
-**What's built (by phase):**
-- **Phase 0:** Repo skeleton, `World` data model, seeded RNG infrastructure.
-- **Phase 1:** `RasterStore` (Zarr), `EventStore` (SQLite), World directory lifecycle.
-- **Phase 2:** `WorldQuery` interface (Layer B abstraction).
-- **Phase 3:** Debug visualizer (matplotlib PNGs) + synthetic world generator + CLI.
-- **Phase 4:** Geology stub (noise heightmap, Voronoi bedrock, soil parent material).
-- **Phase 5:** Climate-hydrology (climate envelope, D8 flow accumulation, hydraulic erosion, derived-state cache).
-- **Phase 6:** Basic ecology (6 ancestor species, suitability, competition, dispersal, seed bank).
-- **Phase 7:** Advanced ecology (distinguished individuals, speciation via fragmentation, fire CA + blowdown disturbance).
-- **Phase 8:** Orchestrator + CLI (tier scheduling, ride advancement, manual commands).
+**Infrastructure (stable):** Zarr `RasterStore` + SQLite `EventStore` + versioned `World`; `WorldQuery` (Layer B); debug2d + webview extractors (Layer C); geology stub; climate-hydrology (climate envelope, D8 flow accumulation, hydraulic erosion, derived-state cache); orchestrator + CLI.
 
-**By the numbers:** 138 tests passing, ~3100 lines source, ~2300 lines tests.
+**Ecology (current model):** single unified per-tick rule — logistic growth `density·growth_rate·(K_eff−load)/K`, fixed-rate mortality `density/(lifespan·4)`, dispersal every tick. 6-trait genome. Absolute suitability normalization with references fit to the world's climate envelope. `COMPETITION_BASELINE` (competition between dissimilar species) is what creates biome structure. Refugium floor lets species survive unfavorable phases. **No seed banks, no biotic pressure, no mast seeding.** Extinction, speciation, and distinguished-individual promotion exist but are **toggleable and currently deferred** (see refactor doc).
 
-**CLI:** `python -m bike_sim` with subcommands: `create`, `advance`, `ride`, `status`, `fire`, `visualize`.
+**By the numbers:** 333 tests, ~7700 lines source.
 
-**End-to-end benchmark:** seed 42 after 125 simulated years produces 15 species (from 6 ancestors), 753 distinguished individuals, 35 fires + 9 blowdowns.
+**CLI:** `python -m bike_sim` with subcommands: `create`, `advance`, `ride`, `status`, `fire`, `visualize`, `ride-experience`, `ride-compare`.
+
+**Testing methodology (core dev workflow):** `scripts/test_ecology.py` — `equilibrium` (freeze slow climate drift, cycle 4 seasonal snapshots, run to a stable state) then `perturb` (temperature/precipitation/fire/species-removal) and verify the response matches an ecological prediction. Validated: equilibrium produces biome structure; a wet perturbation makes dry species retreat and wet/mid species rebound from refugia (biome migration).
 
 **Next steps:**
-1. Phase 9 — Godot extractor (produce renderer-specific outputs from simulation state).
-2. Phase 10 — Asset agent.
+1. More perturbation tests (temperature shift, fire, species removal).
+2. Re-enable climate cycling and watch biome migration happen naturally over the cycle (the original goal — species ranges shifting in *phase*, not just amplitude).
+3. Later: dedicated extinction/speciation design session; warm-wet genome redistribution (see known gaps); then Phase 9 (Godot extractor) and Phase 10 (asset agent).
 
-**Known gaps to address:**
-- Erosion is too gentle; landscapes lack dramatic carved features.
+**Known gaps / open threads:**
+- Erosion is too gentle; landscapes lack dramatic carved features, and terrain is jagged/high (rideability work deferred to pre-render phase).
 - No river graph (only D8 flow accumulation raster; no discrete channel/confluence structure).
-- No upward event communication (lower tiers cannot yet notify higher tiers of state changes via events).
-- Individual lifecycle is accumulate-only (distinguished individuals are created but never die or age out).
-- Ecology tick performance needs profiling and likely optimization as world complexity grows.
+- No upward event communication (lower tiers can't yet notify higher tiers via events).
+- **Warm-wet species stranded**: this world's temp/precip are anticorrelated (~−0.48), so warm-AND-wet conditions don't exist; 4 ancestor genomes target a niche off the achievable climate manifold. Genomes should eventually be redistributed onto the manifold.
+- Ecology tick is slow (~600s per 100yr-epoch on 1000×1000 × 14 species); optimization deferred until the dedicated mini PC arrives.
 
 Hardware: development on MacBook Pro (Apple Silicon); target mini PC to be sourced. Write CPU-vectorized numpy/numba code; reserve GPU compute for a later port with CPU fallback.
 

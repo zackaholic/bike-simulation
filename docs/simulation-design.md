@@ -57,80 +57,123 @@ Recomputed at each climate-hydrology tick:
 
 ## Ecology
 
+> The ecology tier was substantially rewritten in June 2026. The guiding
+> principle is **resolution over coefficients**: a simple rule applied at high
+> spatial/temporal granularity (1M cells × thousands of ticks × 14 species)
+> produces emergent, legible behavior; drama comes from perturbing the
+> *environment*, not from stacking tick complexity. See
+> `ecology-tick-refactor.md` for the full design and rationale, and
+> `decisions.md` for the incremental decisions.
+
 ### Species data model
 
 Each species has:
-- **Genome**: 15-25 dimensional trait vector
-  - Continuous traits: leaf area, root depth, max height, lifespan, drought tolerance, frost tolerance, shade tolerance, seed mass, growth rate, etc.
-  - Categorical traits: woody vs. herbaceous, evergreen vs. deciduous, reproduction mode, dispersal mode.
-  - Linked tradeoffs: high growth rate ↔ short lifespan; large seeds ↔ low seed count; drought tolerance ↔ growth rate in moist conditions.
-  - Traits constrained to fall mostly on the Grime CSR manifold (competitor / stress-tolerator / ruderal).
-- **Range**: density field across the map (50m resolution).
-- **History**: when it appeared, lineage (parent species ID), notable events (range fragmentation, near-extinction recoveries, etc.).
+- **Genome**: 6 traits, each mapping to exactly one mechanism — `drought_tolerance`,
+  `frost_tolerance`, `growth_rate`, `max_height` (competition / shading),
+  `lifespan` (base mortality), `dispersal_range`. Additional traits
+  (shade_tolerance, mast_interval, morphology for rendering) are deferred and
+  added back only when they earn rider-visible effects.
+- **Range**: density field across the map (50m resolution). Density is continuous
+  biomass per cell, not an individual count.
+- **History**: when it appeared, lineage (parent species ID if speciated).
 
-### Establishment suitability
+### Suitability (absolute normalization)
 
-For each species at each cell, compute a product of factor-matches:
-- Drought tolerance vs. summer soil moisture.
-- Frost tolerance vs. winter minimum temperature.
-- Shade tolerance vs. existing canopy.
-- Soil type tolerance.
-- etc.
+For each species at each cell, suitability is a **product** of Gaussian
+factor-matches (Liebig's law of the minimum — a severe mismatch on any axis
+knocks suitability toward zero):
+- Drought stress (from precipitation) vs. `drought_tolerance`.
+- Temperature vs. warmth preference (`1 - frost_tolerance`).
 
-Each factor is a Gaussian-ish match function. **Product**, not sum (Liebig's law of the minimum: severe mismatch in any factor knocks suitability to ~zero).
+Normalization uses **fixed reference ranges fit to the world's climate
+envelope** (e.g. precip 350–2650mm, temp −10/30°C), held constant rather than
+recomputed per tick. This is load-bearing: a per-tick/relative normalization
+erases the temporal climate signal, so a wet-vs-dry century looks identical and
+species ranges never migrate. Fixed references let a global climate shift
+actually change suitability, which is what drives biome migration.
 
-Then add a competition term: existing residents consume light, water, nutrients in proportion to their density and traits. New establishers must find under-exploited niches.
+### The tick (one unified rule, every season)
 
-### Population dynamics
-- Reproduction: existing populations produce seed input to neighboring cells (dispersal kernel depends on dispersal trait).
-- Mortality: from old age, competition, stress, disturbance.
-- Establishment: from seed input + seed bank, weighted by suitability and competition.
+There is **no season-specific branching** in the core math. Each tick, for each
+species at each cell:
 
-### Seed bank
-- Each soil cell has a sparse map `{species_id: seed_density}`.
-- Decay rate depends on species traits (some species: ~5 year half-life; others: ~200 year).
-- After disturbance, establishment can draw from current seed input *or* from the seed bank.
-- This produces "return-of-the-vanished" moments — burned hillsides come back as something suppressed for a century.
+- **Logistic growth**: `density × growth_rate × (K_eff − load)/K × 0.25`, where
+  `K_eff = K × suitability` is the species' per-cell carrying capacity and
+  `load` is the competition-weighted sum of all species' densities. The
+  `(K_eff − load)/K` term goes **negative** when overcrowded — this negative
+  feedback is what keeps density from overshooting carrying capacity.
+- **Mortality**: a fixed base rate `density / (lifespan × 4)`. Mortality does
+  *not* scale with suitability — suitability already governs growth, and making
+  mortality climate-dependent too created a contraction ratchet (species dying
+  in their own suitable habitat).
+- **Carrying capacity** `K` varies by terrain (~5 on dry ridges to ~20 in wet
+  lowlands), from moisture × elevation.
 
-### Distinguished individuals
+Breakeven suitability is therefore analytically predictable:
+`suit > 1 / (growth_rate × lifespan × 4)` — very low, so suitability alone
+doesn't draw range boundaries. **Competition does** (next).
 
-When a plant survives past an age threshold in a *prominent* position, it gets promoted:
-- Unique ID, stable position, age, accumulated event log.
-- Promotion triggers: local height maximum within radius, only specimen of species within radius, unusually old, adjacent to bike path, survivor of disturbance that killed neighbors.
-- Persists across simulation ticks until it dies.
-- After death: snag → log → mound, each with decreasing prominence over decades.
+### Competition draws the boundaries
 
-### Speciation
+A Lotka-Volterra alpha matrix weights how strongly species compete by genome
+distance, but with a **baseline floor** (`COMPETITION_BASELINE`): even
+functionally dissimilar species compete for shared physical space. In each cell
+the species with the highest local `K_eff` (best-suited) suppresses the others,
+so biome boundaries emerge where the suitability ranking flips between species —
+and *move* as climate shifts. Without the baseline, every species survives
+everywhere it's remotely suited and the world becomes a uniform soup.
 
-Each species' range is tracked as a graph of connected populations (flood-fill on cells where density > threshold).
+### Dispersal and refugia
 
-When the graph fragments — population isolated by impassable barrier — start a divergence clock on the isolated piece. Traits drift directionally toward local conditions. When divergence clock + trait distance exceeds threshold, populations speciate.
+- **Dispersal** runs every tick from living density: a local distance-weighted
+  kernel (radius = `dispersal_range`) plus rare long-distance jumps. No seed
+  bank — recolonization happens from range edges, where empty cells have zero
+  competition so arriving propagules grow fast.
+- **Refugium floor** (optional): a species retains a trace presence in its single
+  most-suitable cell so it can wait out an unfavorable phase and rebound when
+  its conditions return. This is how a wet specialist survives dry centuries to
+  flourish again at the next wet peak — the soft alternative to a seed bank.
 
-Result: real evolutionary radiation. Start with 5-10 ancestors; after deep time, dozens of derived species traceable to specific geographic/climatic events.
+### Deferred mechanics (toggleable)
+
+These exist in code but are gated behind toggles and currently disabled while the
+core dynamics are validated:
+- **Distinguished individuals**: prominent trees promoted to named, tracked
+  individuals (snag → log → mound after death). Restricted to trees.
+- **Extinction & speciation**: deferred together to a dedicated design session —
+  extinction without reliable speciation collapses diversity, and speciation has
+  been hard to get right. Likely to return as a paired mechanic.
 
 ### Disturbance regimes
 
-- **Fire**: cellular automaton. Ignition from "lightning" (low base rate, modulated by climate). Spread depends on vegetation density, moisture, wind, slope. Fires bare-soil affected cells, kill above-ground biomass, trigger seed-bank germination cycles. Fire events emit "burned area" upward to climate-hydrology (erosion pulse follows).
-- **Blowdown**: storm-triggered windthrow in exposed positions.
-- **Flood**: from hydrology tier; scours riparian zones, deposits sediment.
-- **Disease/insect outbreaks**: low-rate stochastic events affecting specific species or genome regions, can kill significant portions of a population.
+Disturbance is the primary *environmental perturbation* — discrete events, not
+per-tick drain:
+- **Fire**: cellular-automaton spread driven by dryness and storm intensity;
+  clears density in the burned area. Recovery is natural (dispersal from
+  unburned edges into now-uncompeted cells).
+- **Blowdown**: storm-triggered windthrow in exposed positions; opens canopy.
+- **Flood / disease / insect outbreaks**: future stochastic perturbations.
 
 ### Keystone species (post-v1)
-A small number of species with outsized impact:
-- A beaver-analog: dams streams, floods forests (which die and become snags then meadows). Has hydrology-write permissions.
-- Large grazers: maintain grasslands by suppressing tree establishment.
-- Possibly: a fungal symbiont required for certain tree establishment.
-
-These create the feedback loops that produce surprises.
+A small number of species with outsized impact (beaver-analog with
+hydrology-write permission, large grazers suppressing trees, fungal symbionts).
+These create feedback loops that produce surprises.
 
 ### Stochasticity by design
 
-Don't make every event causally derivable from the tiers below. Real ecosystems have:
-- Long-distance dispersal founding new populations where they shouldn't quite be able to reach.
-- Beetle outbreaks, seed-mast years, random rare events.
-- Genetic drift untied to selection pressure.
+Don't make every event causally derivable from the tiers below — include
+irreducibility at each tier (long-distance dispersal, rare outbreaks). The
+"huh, what's that doing here?" moments are the payoff.
 
-Include some irreducibility at each tier. The "huh, what's that doing here?" moments are the payoff.
+### Testing methodology
+
+The ecology is validated by a falsifiable test loop (`scripts/test_ecology.py`):
+run to **equilibrium** under a frozen-drift seasonal cycle (slow climate held
+constant, 4 seasonal snapshots cycled), then apply a single **perturbation**
+(temperature/precipitation shift, fire, species removal) and verify the response
+matches an ecological prediction — e.g. "a wet shift makes dry species retreat
+and wet species rebound from their refugia." This is the core development
+workflow for tuning ecology parameters.
 
 ## Overnight advancement
 

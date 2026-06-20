@@ -1,20 +1,17 @@
-"""Ecology simulation tier — seasonal species dynamics, disturbance, and niche differentiation.
+"""Ecology simulation tier — species dynamics, disturbance, and niche differentiation.
 
 This is the third and topmost tier in the three-tier simulation stack.  It
 receives a ``SeasonalWeather`` object each tick and produces per-species density
-fields, seed banks, and disturbance events.
+fields and disturbance events.
 
-The tier operates at **0.25 years per tick** (one season).  Each tick runs
-season-specific operations:
+The tier operates at **0.25 years per tick** (one season).  Every tick runs the
+same rule: compute suitability, grow, die at a fixed base rate, compete via
+Lotka-Volterra alpha matrix, and disperse.  Seasonal variation comes from
+weather inputs, not from season-specific code paths.
 
-- **Winter (0):** frost-driven mortality.
-- **Spring (1):** leaf-out risk, seed bank establishment.
-- **Summer (2):** growth/competition, drought mortality, fire disturbance.
-- **Fall (3):** seed production/dispersal, senescence, blowdown disturbance.
-
-Every tick also updates cumulative drought stress, biomass age tracking, and
-enforces carrying capacity.  Individual promotion runs annually (every 4 ticks)
-and speciation checks run every 50 years (200 ticks).
+Fire disturbance runs in summer (season 2) and blowdown in fall (season 3).
+Individual promotion runs annually (every 4 ticks) and speciation checks run
+every 50 years (200 ticks).
 
 All randomness flows through ``create_rng`` with tier_id="ecology" and
 distinct pass_ids, ensuring full reproducibility from the world seed.
@@ -31,106 +28,195 @@ from bike_sim.world import World
 
 TIER = "ecology"
 
-# Trait categories for speciation drift.
-_MORPHOLOGICAL_TRAITS = {
-    "growth_form", "leaf_size", "leaf_shape", "flower_color",
-    "flower_size", "bark_texture", "stem_woodiness",
-}
-_BOUNDED_FUNCTIONAL = {
-    "drought_tolerance", "frost_tolerance", "shade_tolerance",
-    "growth_rate", "seed_mass", "phenological_aggressiveness", "evergreenness",
-}
+# Absolute reference ranges for suitability normalization. These are LOCKED to
+# our world's actual climate envelope (seed-42 archetype) measured across a full
+# climate cycle (precip 344-2658mm, temp -5.4 to 21.1°C across 600yr x 4 seasons).
+# Fitting the references to the achievable envelope maps the genome distribution
+# onto conditions the world actually visits, so every species reaches strong
+# suitability at some phase of the cycle (wet specialists at the wet peak, dry at
+# the trough) rather than being permanently marginal. Fixed (not per-tick) so
+# temporal climate signal is preserved.
+PRECIP_REF_MIN = 350.0   # mm  (driest the world gets)
+PRECIP_REF_MAX = 2650.0  # mm  (wettest the world gets)
+TEMP_REF_MIN = -10.0     # °C
+TEMP_REF_MAX = 30.0      # °C
+
+# Baseline competition: how much functionally dissimilar species compete for
+# shared physical space. 0.0 = only similar species compete (uniform soup,
+# no biome structure); 1.0 = all species compete fully regardless of niche
+# (risk of global competitive exclusion / monoculture). This is the primary
+# knob for biome differentiation — tune via the equilibrium test.
+COMPETITION_BASELINE = 0.4
+
+# Core genome traits (6 traits, each maps to exactly one mechanism).
+_CORE_TRAITS = [
+    "drought_tolerance", "frost_tolerance", "growth_rate",
+    "max_height", "lifespan", "dispersal_range",
+]
 
 # Archetype trait templates: (name, genome dict before perturbation).
+# Organized by structural role for broad world coverage:
+#   Canopy trees (3): slow, tall, heavy seeds
+#   Understory trees (2): faster, shorter, moderate seeds
+#   Tall shrubs (4): moderate height, wide tolerance ranges
+#   Low shrubs/forbs (5): fast, short, light seeds
 _ANCESTOR_TEMPLATES: list[tuple[str, dict]] = [
+    # ── Canopy trees ──────────────────────────────────────────────
     (
-        "lowland_herb",
+        "valley_hardwood",  # warm, wet lowlands — deciduous canopy tree
         {
-            "drought_tolerance": 0.3,
-            "frost_tolerance": 0.15,
-            "shade_tolerance": 0.3,
-            "growth_rate": 0.85,
-            "seed_mass": 0.1,
-            "max_height": 0.5,
-            "lifespan": 10.0,
-            "phenological_aggressiveness": 0.7,
-            "evergreenness": 0.1,
-            "mast_interval": 1,
-        },
-    ),
-    (
-        "upland_grass",
-        {
-            "drought_tolerance": 0.45,
-            "frost_tolerance": 0.75,
-            "shade_tolerance": 0.2,
-            "growth_rate": 0.6,
-            "seed_mass": 0.15,
-            "max_height": 0.8,
-            "lifespan": 15.0,
-            "phenological_aggressiveness": 0.4,
-            "evergreenness": 0.3,
-            "mast_interval": 1,
-        },
-    ),
-    (
-        "valley_tree",
-        {
-            "drought_tolerance": 0.3,
-            "frost_tolerance": 0.25,
-            "shade_tolerance": 0.8,
+            "drought_tolerance": 0.25,
+            "frost_tolerance": 0.2,
             "growth_rate": 0.2,
-            "seed_mass": 0.75,
-            "max_height": 25.0,
-            "lifespan": 300.0,
-            "phenological_aggressiveness": 0.3,
-            "evergreenness": 0.2,
-            "mast_interval": 4,
+            "max_height": 30.0,
+            "lifespan": 400.0,
+            "dispersal_range": 2,  # from seed_mass 0.8: 2 + int(4 * 0.2) = 2
         },
     ),
     (
-        "ridge_shrub",
+        "upland_conifer",  # cool, moderate moisture — evergreen canopy tree
         {
-            "drought_tolerance": 0.8,
-            "frost_tolerance": 0.5,
-            "shade_tolerance": 0.15,
-            "growth_rate": 0.35,
-            "seed_mass": 0.4,
-            "max_height": 3.0,
-            "lifespan": 60.0,
-            "phenological_aggressiveness": 0.2,
-            "evergreenness": 0.7,
-            "mast_interval": 2,
+            "drought_tolerance": 0.5,
+            "frost_tolerance": 0.7,
+            "growth_rate": 0.15,
+            "max_height": 25.0,
+            "lifespan": 500.0,
+            "dispersal_range": 3,  # from seed_mass 0.6: 2 + int(4 * 0.4) = 3
         },
     ),
     (
-        "pioneer_forb",
+        "wet_broadleaf",  # wet, mild — tall broadleaf in moist areas
+        {
+            "drought_tolerance": 0.15,
+            "frost_tolerance": 0.3,
+            "growth_rate": 0.25,
+            "max_height": 28.0,
+            "lifespan": 350.0,
+            "dispersal_range": 3,  # from seed_mass 0.7: 2 + int(4 * 0.3) = 3
+        },
+    ),
+    # ── Understory / edge trees ───────────────────────────────────
+    (
+        "gap_filler",  # fast-growing edge tree, colonizes clearings
         {
             "drought_tolerance": 0.35,
             "frost_tolerance": 0.35,
-            "shade_tolerance": 0.1,
-            "growth_rate": 0.95,
-            "seed_mass": 0.05,
-            "max_height": 0.3,
-            "lifespan": 5.0,
-            "phenological_aggressiveness": 0.8,
-            "evergreenness": 0.0,
-            "mast_interval": 1,
+            "growth_rate": 0.5,
+            "max_height": 12.0,
+            "lifespan": 80.0,
+            "dispersal_range": 4,  # from seed_mass 0.4: 2 + int(4 * 0.6) = 4
         },
     ),
     (
-        "alpine_cushion",
+        "riparian_tree",  # moisture-loving streamside tree
+        {
+            "drought_tolerance": 0.1,
+            "frost_tolerance": 0.4,
+            "growth_rate": 0.45,
+            "max_height": 15.0,
+            "lifespan": 100.0,
+            "dispersal_range": 4,  # from seed_mass 0.3: 2 + int(4 * 0.7) = 4
+        },
+    ),
+    # ── Tall shrubs ───────────────────────────────────────────────
+    (
+        "ridge_scrub",  # drought-hardy exposed ridgeline shrub
+        {
+            "drought_tolerance": 0.8,
+            "frost_tolerance": 0.5,
+            "growth_rate": 0.3,
+            "max_height": 3.0,
+            "lifespan": 60.0,
+            "dispersal_range": 4,  # from seed_mass 0.35: 2 + int(4 * 0.65) = 4
+        },
+    ),
+    (
+        "valley_thicket",  # wet valley shrub, forms dense stands
+        {
+            "drought_tolerance": 0.2,
+            "frost_tolerance": 0.3,
+            "growth_rate": 0.4,
+            "max_height": 4.0,
+            "lifespan": 40.0,
+            "dispersal_range": 4,  # from seed_mass 0.3: 2 + int(4 * 0.7) = 4
+        },
+    ),
+    (
+        "heath_shrub",  # cold-tolerant moorland/heathland shrub
+        {
+            "drought_tolerance": 0.55,
+            "frost_tolerance": 0.7,
+            "growth_rate": 0.25,
+            "max_height": 1.5,
+            "lifespan": 50.0,
+            "dispersal_range": 5,  # from seed_mass 0.2: 2 + int(4 * 0.8) = 5
+        },
+    ),
+    (
+        "dry_scrub",  # arid-adapted shrub
+        {
+            "drought_tolerance": 0.9,
+            "frost_tolerance": 0.4,
+            "growth_rate": 0.2,
+            "max_height": 2.0,
+            "lifespan": 70.0,
+            "dispersal_range": 5,  # from seed_mass 0.25: 2 + int(4 * 0.75) = 5
+        },
+    ),
+    # ── Low shrubs / forbs / ground-hugging ───────────────────────
+    (
+        "meadow_herb",  # mesic meadow flowering herb
+        {
+            "drought_tolerance": 0.3,
+            "frost_tolerance": 0.3,
+            "growth_rate": 0.8,
+            "max_height": 0.5,
+            "lifespan": 10.0,
+            "dispersal_range": 5,  # from seed_mass 0.1: 2 + int(4 * 0.9) = 5
+        },
+    ),
+    (
+        "upland_grass",  # cold-tolerant grassland species
+        {
+            "drought_tolerance": 0.45,
+            "frost_tolerance": 0.75,
+            "growth_rate": 0.6,
+            "max_height": 0.8,
+            "lifespan": 15.0,
+            "dispersal_range": 5,  # from seed_mass 0.15: 2 + int(4 * 0.85) = 5
+        },
+    ),
+    (
+        "pioneer_forb",  # fast-growing disturbance colonizer
+        {
+            "drought_tolerance": 0.35,
+            "frost_tolerance": 0.35,
+            "growth_rate": 0.95,
+            "max_height": 0.3,
+            "lifespan": 5.0,
+            "dispersal_range": 5,  # from seed_mass 0.05: 2 + int(4 * 0.95) = 5
+        },
+    ),
+    (
+        "alpine_cushion",  # high-altitude stress-tolerator
         {
             "drought_tolerance": 0.65,
             "frost_tolerance": 0.85,
-            "shade_tolerance": 0.05,
             "growth_rate": 0.1,
-            "seed_mass": 0.2,
             "max_height": 0.1,
             "lifespan": 80.0,
-            "phenological_aggressiveness": 0.1,
-            "evergreenness": 0.8,
-            "mast_interval": 3,
+            "dispersal_range": 5,  # from seed_mass 0.2: 2 + int(4 * 0.8) = 5
+        },
+    ),
+    (
+        "dry_grass",  # drought-adapted grassland species
+        {
+            "drought_tolerance": 0.75,
+            "frost_tolerance": 0.4,
+            "growth_rate": 0.5,
+            "max_height": 0.6,
+            "lifespan": 8.0,
+            "dispersal_range": 5,  # from seed_mass 0.1: 2 + int(4 * 0.9) = 5
         },
     ),
 ]
@@ -211,9 +297,9 @@ def _fragments_connect_through_hospitable(
 ) -> bool:
     """BFS from *fragment* through *hospitable* cells; return True if it reaches *main*.
 
-    All arrays must be the same shape (typically the downsampled 100×100 grid).
-    A True result means there is no real barrier — the species could grow
-    through the gap — so speciation should be rejected.
+    All arrays must be the same shape (typically the downsampled 100x100 grid).
+    A True result means there is no real barrier -- the species could grow
+    through the gap -- so speciation should be rejected.
     """
     rows, cols = fragment.shape
     # Seed BFS from all fragment cells
@@ -227,11 +313,11 @@ def _fragments_connect_through_hospitable(
             nr, nc = r + dr, c + dc
             if 0 <= nr < rows and 0 <= nc < cols and not visited[nr, nc]:
                 if main[nr, nc]:
-                    return True  # reached main population — no barrier
+                    return True  # reached main population -- no barrier
                 if hospitable[nr, nc]:
                     visited[nr, nc] = True
                     queue.append((nr, nc))
-    return False  # couldn't reach main — barrier exists
+    return False  # couldn't reach main -- barrier exists
 
 
 def _connected_components_coarse(
@@ -246,7 +332,7 @@ def _connected_components_coarse(
     cr = rows // downsample
     cc = cols // downsample
 
-    # Downsample using reshape + any — much faster than Python loops.
+    # Downsample using reshape + any -- much faster than Python loops.
     coarse = (
         mask[: cr * downsample, : cc * downsample]
         .reshape(cr, downsample, cc, downsample)
@@ -275,15 +361,33 @@ def _connected_components_coarse(
 
 
 class EcologyTier:
-    """Ecology tier: seasonal species dynamics, disturbance, and niche differentiation."""
+    """Ecology tier: species dynamics, disturbance, and niche differentiation."""
 
     GRID_SIZE: int = 1000
     YEARS_PER_TICK: float = 0.25
-    NUM_ANCESTORS: int = 6  # within the test-required 5-8 range
+    TICKS_PER_YEAR: int = 4
+    NUM_ANCESTORS: int = 14  # 3 canopy + 2 understory + 4 shrub + 5 forb/grass
     CELL_SIZE: float = 50.0  # meters per grid cell (50 km / 1000 cells)
 
     def __init__(self, world: World) -> None:
         self._world = world
+        # Mechanic toggles. Extinction and speciation are deferred to a dedicated
+        # design session — extinction without working speciation collapses the
+        # world to one species, and speciation itself is not yet reliable. Tests
+        # and runs that want a fixed 14-species substrate disable both. Defaults
+        # preserve prior behavior so existing tests are unaffected.
+        self.enable_extinction = True
+        self.enable_speciation = True
+        # Distinguished-individual promotion + lifecycle. Not part of the core
+        # grow/compete/disperse dynamics under test, adds SQLite overhead, and
+        # keys DI ids on tick number (which collides if ticks are ever re-run).
+        # Tests validating density dynamics disable it.
+        self.enable_individuals = True
+        # Refugium floor: minimum total density a species retains, seeded into its
+        # single most-suitable cell so it can wait out unfavorable phases and
+        # rebound when conditions return. 0.0 = off. This is what lets wet
+        # specialists survive dry centuries (and vice versa) for full cyclic swings.
+        self.refugium_floor = 0.0
 
     # ── public API ─────────────────────────────────────────────────
 
@@ -301,52 +405,48 @@ class EcologyTier:
         # Load all species state (exclude extinct species)
         current_year = self._world.tier_clocks[TIER].simulated_year
         species_list = self._world.events.list_species(alive_at_year=current_year)
-        densities, seed_banks = self._load_species_state(species_list)
+        densities = self._load_species_state(species_list)
 
-        # Season-specific operations
-        if season == 0:  # Winter
-            self._winter_mortality(weather, species_list, densities)
-        elif season == 1:  # Spring
-            self._spring_leafout_and_frost(weather, species_list, densities)
-            self._spring_establishment(weather, species_list, densities, seed_banks)
-        elif season == 2:  # Summer
-            self._summer_growth_and_competition(weather, species_list, densities, tick_num)
-            self._summer_drought_mortality(weather, species_list, densities)
+        # Core ecology: growth, competition, mortality
+        self._grow_and_compete(weather, species_list, densities)
+
+        # Dispersal every tick
+        self._disperse_all(species_list, densities, tick_num)
+
+        # Apply density floor
+        for sid in densities:
+            densities[sid] = np.where(densities[sid] < 0.001, 0.0, densities[sid])
+
+        # Fire disturbance (summer only)
+        if season == 2:
             self._fire_disturbance(weather, species_list, densities, tick_num)
-        elif season == 3:  # Fall
-            self._seed_production_and_dispersal(weather, species_list, densities, seed_banks, tick_num)
-            self._senescence_and_fuel(weather, species_list, densities)
+
+        # Blowdown (fall only)
+        if season == 3:
             self._blowdown_disturbance(weather, species_list, densities, tick_num)
 
-        # Every tick:
-        self._update_cumulative_drought(weather)
-        self._update_biomass_age(species_list, densities)
+        # Refugium floor: keep a trace of each species alive in its best cell so
+        # it can rebound when its favorable phase returns.
+        if self.refugium_floor > 0.0:
+            self._apply_refugium_floor(weather, species_list, densities)
 
-        # Individual lifecycle (aging, death, post-mortem transitions)
-        self._update_individual_lifecycle(tick_num)
-
-        # Enforce carrying capacity
-        self._enforce_carrying_capacity(densities)
-
-        # Biotic pressure: oscillating top-down mortality from pathogens/herbivores
-        # Skip first 8 ticks (2 years) — let species establish before pressure builds
-        if tick_num >= 8:
-            self._apply_biotic_pressure(species_list, densities, weather)
-
-        # Check for species extinction (minimum viable population)
-        # Skip on tick 0 — species were just created and need time to establish
-        if tick_num > 0:
-            self._check_extinction(species_list, densities, seed_banks, tick_num)
+        # Check for species extinction
+        if self.enable_extinction and tick_num > 0:
+            self._check_extinction(species_list, densities, tick_num)
 
         # Write all state
-        self._write_species_state(species_list, densities, seed_banks, tick_num)
+        self._write_species_state(species_list, densities, tick_num)
 
-        # Promote individuals every 4 ticks (annually)
-        if tick_num % 4 == 0:
-            self._promote_individuals(tick_num)
+        if self.enable_individuals:
+            # Individual lifecycle (aging, death, post-mortem transitions)
+            self._update_individual_lifecycle(tick_num)
+
+            # Promote individuals every 4 ticks (annually)
+            if tick_num % 4 == 0:
+                self._promote_individuals(tick_num)
 
         # Speciation check every 200 ticks (50 years)
-        if tick_num > 0 and tick_num % 200 == 0:
+        if self.enable_speciation and tick_num > 0 and tick_num % 200 == 0:
             self._check_speciation(tick_num, weather)
             self._check_reabsorption(tick_num, weather)
 
@@ -361,10 +461,10 @@ class EcologyTier:
         for idx, (name, template) in enumerate(_ANCESTOR_TEMPLATES):
             genome = {}
             for key, val in template.items():
-                if key == "mast_interval":
+                if key == "dispersal_range":
                     # Integer trait: perturb by rounding after uniform offset.
-                    genome["mast_interval"] = int(
-                        np.clip(round(val + rng.uniform(-0.5, 0.5)), 1, 7)
+                    genome["dispersal_range"] = int(
+                        np.clip(round(val + rng.uniform(-0.5, 0.5)), 1, 6)
                     )
                 else:
                     perturb = rng.uniform(-0.05, 0.05)
@@ -373,69 +473,9 @@ class EcologyTier:
                     if key in (
                         "drought_tolerance",
                         "frost_tolerance",
-                        "shade_tolerance",
                         "growth_rate",
-                        "seed_mass",
-                        "phenological_aggressiveness",
-                        "evergreenness",
                     ):
                         genome[key] = float(np.clip(genome[key], 0.0, 1.0))
-
-            # ── Morphological trait derivation (soft coupling + random offset) ──
-
-            # growth_form: enum 0-4 (tree=0, shrub=1, herb=2, grass=3, cushion=4)
-            if genome["max_height"] > 10:
-                base_form = 0  # tree
-            elif genome["max_height"] > 1.5:
-                base_form = 1  # shrub
-            elif genome["lifespan"] > 20:
-                base_form = 2  # herb
-            elif genome["growth_rate"] > 0.5:
-                base_form = 3  # grass
-            else:
-                base_form = 4  # cushion
-            genome["growth_form"] = base_form
-
-            # leaf_size: [0, 1], coupled to shade_tolerance (+) and drought_tolerance (-)
-            genome["leaf_size"] = float(np.clip(
-                genome["shade_tolerance"] * 0.6
-                - genome["drought_tolerance"] * 0.4
-                + 0.4
-                + rng.normal(0, 0.1),
-                0.0, 1.0,
-            ))
-
-            # leaf_shape: [0, 1] (0=needle, 1=broad), coupled to evergreenness
-            genome["leaf_shape"] = float(np.clip(
-                1.0 - genome["evergreenness"] * 0.7 + rng.normal(0, 0.1),
-                0.0, 1.0,
-            ))
-
-            # flower_color: [0, 1] (hue wheel), fully independent
-            genome["flower_color"] = float(rng.uniform(0, 1))
-
-            # flower_size: [0, 1], inversely correlated with seed_mass and evergreenness
-            genome["flower_size"] = float(np.clip(
-                0.6
-                - genome["seed_mass"] * 0.3
-                - genome["evergreenness"] * 0.3
-                + rng.normal(0, 0.1),
-                0.0, 1.0,
-            ))
-
-            # bark_texture: [0, 1] (smooth to rough), correlated with lifespan
-            genome["bark_texture"] = float(np.clip(
-                min(genome["lifespan"] / 300.0, 1.0) + rng.normal(0, 0.1),
-                0.0, 1.0,
-            ))
-
-            # stem_woodiness: [0, 1] (herbaceous to woody)
-            genome["stem_woodiness"] = float(np.clip(
-                min(genome["lifespan"] / 200.0, 1.0) * 0.6
-                + (1.0 - genome["growth_rate"]) * 0.4
-                + rng.normal(0, 0.1),
-                0.0, 1.0,
-            ))
 
             self._world.events.add_species(
                 species_id=f"anc_{idx:02d}_{name}",
@@ -447,11 +487,22 @@ class EcologyTier:
     # ── initial populations ────────────────────────────────────────
 
     def _seed_initial_populations(self, tick_number: int, weather: SeasonalWeather) -> None:
+        """Broad noise-based placement: scatter species across suitable habitat.
+
+        Each species gets a unique noise field (from world seed + species index)
+        that creates natural clustering (groves, patches). Initial density is
+        suitability * noise * height-based max density, zeroed below a threshold.
+
+        This produces a world that is already "full" -- every habitable cell has
+        vegetation appropriate to its climate zone.
+        """
+        from bike_sim.tiers.geology import _bilinear_upsample
+
         rng = create_rng(self._world.seed, "ecology", "init_pop", tick_number)
         store = self._world.rasters
 
         # Use annual-mean climate for initial placement, not the current
-        # season's weather.  Tick 0 is winter — warm-loving species would
+        # season's weather.  Tick 0 is winter -- warm-loving species would
         # get zero suitability and never establish if we used winter weather.
         base_temp = store.read_layer("climate_hydrology", "temperature")
         base_precip = store.read_layer("climate_hydrology", "precipitation")
@@ -463,16 +514,48 @@ class EcologyTier:
             season=1,  # cosmetic; suitability doesn't check this field
         )
 
-        for sp in self._world.events.list_species():
+        for idx, sp in enumerate(self._world.events.list_species()):
             sid = sp["species_id"]
             genome = self._world.events.get_species(sid)["genome"]
-            suit = self._compute_suitability_from_weather(genome, annual_weather)
-            # Place low density in areas with good suitability.
+            suit = self._compute_suitability(genome, annual_weather)
+
+            # Height-based max density and noise scale:
+            # tall trees are sparse with large patches, short plants are dense and dispersed
+            max_height = genome.get("max_height", 1.0)
+            if max_height > 15:
+                max_density = 1.5
+                sz1, sz2 = 5, 10
+            elif max_height > 5:
+                max_density = 2.5
+                sz1, sz2 = 6, 12
+            elif max_height > 1.5:
+                max_density = 3.0
+                sz1, sz2 = 8, 16
+            else:
+                max_density = 4.0
+                sz1, sz2 = 10, 20
+
+            # Generate species-specific clustering noise
+            noise = np.zeros((self.GRID_SIZE, self.GRID_SIZE), dtype=np.float64)
+            n1 = rng.random((sz1, sz1))
+            noise += _bilinear_upsample(n1, self.GRID_SIZE) * 1.0
+            n2 = rng.random((sz2, sz2))
+            noise += _bilinear_upsample(n2, self.GRID_SIZE) * 0.5
+
+            # Normalize noise to [0, 1]
+            lo, hi = noise.min(), noise.max()
+            if hi > lo:
+                noise = (noise - lo) / (hi - lo)
+            else:
+                noise[:] = 0.5
+
+            # Initial density = suitability * noise * max_density
             initial = np.where(
-                suit > 0.3,
-                suit * rng.uniform(0.5, 2.0, suit.shape),
+                suit > 0.15,
+                suit * noise * max_density,
                 0.0,
             )
+
             store.write_layer(
                 TIER,
                 f"species_{sid}_density",
@@ -480,164 +563,72 @@ class EcologyTier:
                 tick_number,
             )
 
-    # ── suitability from weather ──────────────────────────────────
+    # ── suitability ───────────────────────────────────────────────
 
-    def _compute_suitability_from_weather(
+    def _compute_suitability(
         self,
         genome: dict,
         weather: SeasonalWeather,
-        canopy_shade: NDArray[np.float64] | None = None,
     ) -> NDArray[np.float64]:
-        """Suitability from current seasonal weather conditions."""
-        n = self.GRID_SIZE
-        suit = np.ones((n, n), dtype=np.float64)
-
-        # Moisture suitability (derive soil moisture from precipitation + terrain)
-        # Normalize precipitation to [0, 1] range
-        precip_norm = np.clip(weather.precipitation / 2000.0, 0, 1)
+        """Absolute-normalized suitability from weather and genome traits."""
+        # Moisture axis: two-parameter affine map onto the world's precip envelope.
+        precip_norm = np.clip(
+            (weather.precipitation - PRECIP_REF_MIN) / (PRECIP_REF_MAX - PRECIP_REF_MIN),
+            0, 1,
+        )
         drought_stress = 1.0 - precip_norm
-        suit *= _gaussian_match(drought_stress, genome["drought_tolerance"], sigma=0.17)
+        suit = _gaussian_match(drought_stress, genome["drought_tolerance"], sigma=0.25)
 
-        # Temperature suitability
-        # Normalize temperature to a preference scale
-        temp_norm = np.clip((weather.temperature - (-10)) / 30.0, 0, 1)  # -10C to 20C range
+        # Temperature axis
+        temp_norm = np.clip(
+            (weather.temperature - TEMP_REF_MIN) / (TEMP_REF_MAX - TEMP_REF_MIN),
+            0, 1,
+        )
         warmth_preference = 1.0 - genome["frost_tolerance"]
-        suit *= _gaussian_match(temp_norm, warmth_preference, sigma=0.17)
-
-        # Light competition via canopy shading (max_height becomes load-bearing)
-        if canopy_shade is not None:
-            # shade_tolerance determines ability to grow under canopy
-            light_available = 1.0 - canopy_shade
-            light_need = 1.0 - genome["shade_tolerance"]
-            # Species that need light are penalized by shade
-            suit *= _gaussian_match(light_available, 1.0 - light_need * 0.5, sigma=0.25)
+        suit *= _gaussian_match(temp_norm, warmth_preference, sigma=0.25)
 
         return suit
 
-    # ── niche overlap ──────────────────────────────────────────────
+    # ── carrying capacity ─────────────────────────────────────────
 
-    @staticmethod
-    def _genome_distance(g1: dict, g2: dict) -> float:
-        """Euclidean distance between two genomes in functional trait space."""
-        keys = [
-            "drought_tolerance", "frost_tolerance", "shade_tolerance",
-            "growth_rate", "seed_mass", "phenological_aggressiveness",
-            "evergreenness",
-        ]
-        return float(np.sqrt(sum((g1.get(k, 0) - g2.get(k, 0)) ** 2 for k in keys)))
-
-    @staticmethod
-    def _competition_alpha(distance: float, niche_width: float = 0.3) -> float:
-        """Lotka-Volterra competition coefficient from genome distance.
-
-        alpha = 1.0 when distance = 0 (identical species compete fully).
-        alpha -> 0 as distance >> niche_width (different species barely compete).
-        """
-        return float(np.exp(-(distance / niche_width) ** 2))
-
-    # ── canopy shade ──────────────────────────────────────────────
-
-    def _compute_canopy_shade(
-        self,
-        species_list: list,
-        densities: dict,
+    def _compute_carrying_capacity(
+        self, weather: SeasonalWeather,
     ) -> NDArray[np.float64]:
-        """Compute canopy shade from species heights and densities."""
-        n = self.GRID_SIZE
-        shade = np.zeros((n, n), dtype=np.float64)
-        for sp in species_list:
-            sid = sp["species_id"]
-            genome = self._world.events.get_species(sid)["genome"]
-            # Shade cast is proportional to density * relative height
-            height_factor = min(genome["max_height"] / 30.0, 1.0)  # normalize to ~30m max
-            shade += densities[sid] * height_factor * 0.1  # 0.1 = shade per unit density
-        return np.clip(shade, 0.0, 1.0)
+        """Terrain-varying K: ~5 on dry ridges to ~20 in wet lowlands."""
+        moisture = np.clip(weather.precipitation / PRECIP_REF_MAX, 0, 1)
+        # Try geology heightmap, fall back to eroded_heightmap or uniform
+        store = self._world.rasters
+        try:
+            elevation = store.read_layer("geology", "heightmap")
+        except KeyError:
+            try:
+                elevation = store.read_layer("climate_hydrology", "eroded_heightmap")
+            except KeyError:
+                elevation = np.zeros((self.GRID_SIZE, self.GRID_SIZE), dtype=np.float64)
+        elev_norm = elevation / (elevation.max() + 1e-10)
+        # Higher moisture, lower elevation = higher K
+        K = 5.0 + 15.0 * moisture * (1.0 - elev_norm * 0.5)
+        return K
 
-    # ── season-specific methods ───────────────────────────────────
+    # ── core ecology rule ─────────────────────────────────────────
 
-    def _winter_mortality(self, weather: SeasonalWeather, species_list: list, densities: dict) -> None:
-        """Winter kill: species with low frost tolerance die in cold conditions."""
-        for sp in species_list:
-            sid = sp["species_id"]
-            genome = self._world.events.get_species(sid)["genome"]
-            cold_hardiness = genome["frost_tolerance"] * 0.8 + genome["evergreenness"] * 0.2
-            # Mortality where frost exceeds hardiness
-            excess_frost = np.clip(weather.frost_severity - cold_hardiness, 0, None)
-            kill_fraction = excess_frost * 0.15  # 15% of excess frost kills
-            densities[sid] *= (1.0 - kill_fraction)
-            densities[sid] = np.clip(densities[sid], 0.0, None)
-
-    def _spring_leafout_and_frost(self, weather: SeasonalWeather, species_list: list, densities: dict) -> None:
-        """Early leafers risk late frost damage."""
-        for sp in species_list:
-            sid = sp["species_id"]
-            genome = self._world.events.get_species(sid)["genome"]
-            aggressiveness = genome["phenological_aggressiveness"]
-            # Only aggressive species leaf out in spring
-            if aggressiveness < 0.3:
-                continue
-            # Frost damage = frost_severity * aggressiveness * (1 - frost_tolerance)
-            damage = weather.frost_severity * aggressiveness * (1.0 - genome["frost_tolerance"])
-            kill_fraction = np.clip(damage * 0.2, 0, 0.5)  # cap at 50% loss
-            densities[sid] *= (1.0 - kill_fraction)
-            densities[sid] = np.clip(densities[sid], 0.0, None)
-
-    def _spring_establishment(
+    def _grow_and_compete(
         self,
         weather: SeasonalWeather,
         species_list: list,
         densities: dict,
-        seed_banks: dict,
     ) -> None:
-        """Recruitment from seed bank, weighted by suitability. Early leafers get bonus."""
+        """Per-tick growth, mortality, and Lotka-Volterra competition."""
         n = self.GRID_SIZE
-        carrying_capacity = 15.0
-        total = sum(densities.values())
-        if isinstance(total, int):
-            total = np.zeros((n, n), dtype=np.float64)
-        available = np.clip(carrying_capacity - total, 0, None)
+        K = self._compute_carrying_capacity(weather)
 
-        canopy = self._compute_canopy_shade(species_list, densities)
-
-        for sp in species_list:
-            sid = sp["species_id"]
-            genome = self._world.events.get_species(sid)["genome"]
-            sb = seed_banks.get(sid, np.zeros((n, n), dtype=np.float64))
-            suit = self._compute_suitability_from_weather(genome, weather, canopy)
-
-            # Early leafers get establishment bonus in spring
-            aggressiveness_bonus = 1.0 + genome["phenological_aggressiveness"] * 0.5
-            establishment = sb * 0.05 * suit * (available / carrying_capacity) * aggressiveness_bonus
-            densities[sid] = densities[sid] + establishment
-            densities[sid] = np.clip(densities[sid], 0.0, None)
-
-            # Recompute available
-            total = np.zeros((n, n), dtype=np.float64)
-            for d in densities.values():
-                total += d
-            available = np.clip(carrying_capacity - total, 0, None)
-
-    def _summer_growth_and_competition(
-        self,
-        weather: SeasonalWeather,
-        species_list: list,
-        densities: dict,
-        tick_num: int,
-    ) -> None:
-        """Main growth season. Height-based light competition with niche overlap."""
-        rng = create_rng(self._world.seed, "ecology", "summer_growth", tick_num)
-        n = self.GRID_SIZE
-        carrying_capacity = 15.0
-
-        # Compute canopy shade
-        canopy = self._compute_canopy_shade(species_list, densities)
-
-        # Precompute genomes and alpha matrix for niche-aware growth
         sids = [sp["species_id"] for sp in species_list]
         genomes = {
             sid: self._world.events.get_species(sid)["genome"]
             for sid in sids
         }
+
+        # Precompute alpha matrix (symmetric)
         alphas: dict[tuple[str, str], float] = {}
         for i, s1 in enumerate(sids):
             for j, s2 in enumerate(sids):
@@ -649,56 +640,127 @@ class EcologyTier:
                     dist = self._genome_distance(genomes[s1], genomes[s2])
                     alphas[(s1, s2)] = self._competition_alpha(dist)
 
-        # Load biomass age for establishment advantage
-        biomass_ages = self._load_biomass_age()
-
-        for sp in species_list:
-            sid = sp["species_id"]
+        for sid in sids:
             genome = genomes[sid]
             density = densities[sid]
-            suit = self._compute_suitability_from_weather(genome, weather, canopy)
+            suit = self._compute_suitability(genome, weather)
 
-            # Niche-aware available capacity: weight competitors by overlap
+            # Effective competition load
             effective_load = np.zeros((n, n), dtype=np.float64)
-            for other_sid in sids:
-                alpha = alphas[(sid, other_sid)]
+            for other in sids:
+                alpha = alphas[(sid, other)]
                 if alpha > 0.01:
-                    effective_load += alpha * densities[other_sid]
-            available = np.clip(carrying_capacity - effective_load, 0, None)
+                    effective_load += alpha * densities[other]
 
-            # Growth scaled by growth_rate, suitability, and available capacity
-            # Established populations (high biomass_age) grow more efficiently
-            age_bonus = 1.0
-            if sid in biomass_ages:
-                age_bonus = 1.0 + np.clip(biomass_ages[sid] / 100.0, 0, 0.5)
+            # Logistic growth with per-species carrying capacity set by suitability.
+            # K_eff = K * suit means the species saturates at density K*suit.
+            # The (K_eff - load)/K term goes NEGATIVE when overcrowded, providing
+            # the negative feedback that corrects overshoot — this is the corrective
+            # force that a clipped "available" term would silently discard.
+            # growth_rate is per-year; 0.25 factor for seasonal tick.
+            k_eff = K * suit
+            logistic = (k_eff - effective_load) / K
+            growth = density * genome["growth_rate"] * logistic * 0.25
 
-            growth = density * genome["growth_rate"] * suit * 0.15 * (available / carrying_capacity) * age_bonus
+            # Mortality: fixed base rate from lifespan (per seasonal tick)
+            base_turnover = 1.0 / (genome["lifespan"] * float(self.TICKS_PER_YEAR))
+            mortality = density * base_turnover
 
-            # Base mortality (1/lifespan scaled for seasonal tick)
-            base_mortality_rate = 0.25 / max(genome["lifespan"], 1.0)
-            stress_mortality = 0.02 * (1.0 - suit)
-            mortality = density * (base_mortality_rate + stress_mortality)
+            densities[sid] = np.clip(density + growth - mortality, 0.0, None)
 
-            density = density + growth - mortality
-            density = np.clip(density, 0.0, None)
+    # ── refugium floor ────────────────────────────────────────────
 
-            # Zero out negligible
-            density = np.where((density < 0.01) & (suit < 0.2), 0.0, density)
-            densities[sid] = density
+    def _apply_refugium_floor(
+        self,
+        weather: SeasonalWeather,
+        species_list: list,
+        densities: dict,
+    ) -> None:
+        """Guarantee each species a trace presence in its most-suitable cell.
 
-    def _summer_drought_mortality(self, weather: SeasonalWeather, species_list: list, densities: dict) -> None:
-        """Drought stress kills species with low drought tolerance."""
-        # Load cumulative drought stress
-        drought_stress = self._load_drought_stress()
+        If a species' total density falls below ``refugium_floor``, seed
+        ``refugium_floor`` density into the single cell where it is currently
+        best suited. This prevents a species from hitting unrecoverable zero
+        during an unfavorable phase, so it can rebound (and act as a dispersal
+        source) when its favorable conditions return.
+        """
+        for sp in species_list:
+            sid = sp["species_id"]
+            if float(densities[sid].sum()) >= self.refugium_floor:
+                continue
+            genome = self._world.events.get_species(sid)["genome"]
+            suit = self._compute_suitability(genome, weather)
+            best = np.unravel_index(int(np.argmax(suit)), suit.shape)
+            densities[sid][best] = max(
+                float(densities[sid][best]), self.refugium_floor
+            )
+
+    # ── dispersal ─────────────────────────────────────────────────
+
+    def _disperse_all(
+        self,
+        species_list: list,
+        densities: dict,
+        tick_num: int,
+    ) -> None:
+        """Run local and long-distance dispersal for all species every tick."""
+        rng = create_rng(self._world.seed, "ecology", "dispersal", tick_num)
+        n = self.GRID_SIZE
 
         for sp in species_list:
             sid = sp["species_id"]
             genome = self._world.events.get_species(sid)["genome"]
-            # Mortality scales with cumulative drought and inversely with tolerance
-            vulnerability = 1.0 - genome["drought_tolerance"]
-            kill_fraction = np.clip(drought_stress * vulnerability * 0.05, 0, 0.3)
-            densities[sid] *= (1.0 - kill_fraction)
-            densities[sid] = np.clip(densities[sid], 0.0, None)
+            density = densities[sid]
+
+            # Local dispersal
+            radius = int(genome.get("dispersal_range", 3))
+            spread = _disperse(density, radius)
+            # Only deposit a fraction (dispersal, not teleportation)
+            deposit_fraction = 0.02  # 2% of density spreads per tick
+            densities[sid] = density * (1.0 - deposit_fraction) + spread * deposit_fraction
+
+            # Long-distance dispersal
+            ldd_prob = 0.1 + 0.4 * (radius / 6.0)  # wider dispersers do more LDD
+            if rng.random() < ldd_prob:
+                source_cells = np.argwhere(density > 0.5)
+                if len(source_cells) > 0:
+                    n_jumps = int(rng.integers(3, 10))
+                    max_jump = int(n * 0.3)
+                    for _ in range(min(n_jumps, len(source_cells))):
+                        src_idx = int(rng.integers(0, len(source_cells)))
+                        sr, sc = source_cells[src_idx]
+                        tr = int(np.clip(sr + rng.integers(-max_jump, max_jump + 1), 0, n - 1))
+                        tc = int(np.clip(sc + rng.integers(-max_jump, max_jump + 1), 0, n - 1))
+                        densities[sid][tr, tc] += float(density[sr, sc]) * 0.02
+
+    # ── niche overlap ─────────────────────────────────────────────
+
+    @staticmethod
+    def _genome_distance(g1: dict, g2: dict) -> float:
+        """Euclidean distance between two genomes in functional trait space."""
+        keys = _CORE_TRAITS
+        return float(np.sqrt(sum((g1.get(k, 0) - g2.get(k, 0)) ** 2 for k in keys)))
+
+    @staticmethod
+    def _competition_alpha(distance: float, niche_width: float = 0.3) -> float:
+        """Lotka-Volterra competition coefficient from genome distance.
+
+        alpha = 1.0 when distance = 0 (identical species compete fully).
+        alpha -> COMPETITION_BASELINE as distance grows (different species still
+        compete for shared physical space — light, water, ground — even when
+        functionally dissimilar).
+
+        The baseline is what makes competition a *spatial* limiter: without it,
+        a poorly-suited species in a cell ignores the well-suited species that
+        should exclude it, and every species survives everywhere (uniform soup).
+        With it, the species with the highest local K_eff (= K * suitability)
+        suppresses the others, so biome boundaries emerge where the suitability
+        ranking flips between species.
+        """
+        niche_term = np.exp(-(distance / niche_width) ** 2)
+        return float(COMPETITION_BASELINE + (1.0 - COMPETITION_BASELINE) * niche_term)
+
+    # ── fire disturbance ──────────────────────────────────────────
 
     def _fire_disturbance(
         self,
@@ -715,11 +777,10 @@ class EcologyTier:
         if tick_num == 0:
             return
 
-        # Derive moisture from precipitation
-        moisture = np.clip(weather.precipitation / 2000.0, 0, 1)
+        # Derive moisture from precipitation (absolute scale for fire risk)
+        moisture = np.clip(weather.precipitation / 3000.0, 0, 1)
 
         # Fire probability scales with dryness and storm intensity
-        # Fewer fires per seasonal tick than per 5-year tick
         fire_rate = 0.3 + weather.storm_intensity * 0.2  # base + storm bonus
         n_fires = int(rng.poisson(fire_rate))
 
@@ -764,79 +825,36 @@ class EcologyTier:
                                 self._world.events.kill_individual(ind["individual_id"], current_year)
                                 self._world.events.update_individual_state(ind["individual_id"], "snag")
 
-    def _seed_production_and_dispersal(
+    def _spread_fire(
         self,
-        weather: SeasonalWeather,
-        species_list: list,
-        densities: dict,
-        seed_banks: dict,
-        tick_num: int,
-    ) -> None:
-        """Fall: produce seeds, disperse, update seed bank."""
-        rng = create_rng(self._world.seed, "ecology", "dispersal", tick_num)
+        start_row: int,
+        start_col: int,
+        moisture: NDArray[np.float64],
+        rng: np.random.Generator,
+    ) -> NDArray[np.bool_]:
+        """Spread fire from ignition point. Returns boolean burned mask."""
         n = self.GRID_SIZE
-        current_year = self._world.tier_clocks[TIER].simulated_year
+        burned = np.zeros((n, n), dtype=bool)
+        burned[start_row, start_col] = True
+        active = [(start_row, start_col)]
 
-        for sp in species_list:
-            sid = sp["species_id"]
-            genome = self._world.events.get_species(sid)["genome"]
-            density = densities[sid]
+        max_cells = int(rng.integers(20, 200))
 
-            # Mast seeding: full production only in mast years
-            mast_interval = int(genome.get("mast_interval", 1))
-            year = int(current_year)
-            # Species-specific phase offset from genome (use hash of sid)
-            phase = hash(sid) % max(mast_interval, 1)
-            if mast_interval > 1 and (year % mast_interval) != phase:
-                seed_multiplier = 0.1  # 10% in non-mast years
-            else:
-                seed_multiplier = 1.0
+        while active and burned.sum() < max_cells:
+            new_active: list[tuple[int, int]] = []
+            for r, c in active:
+                for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < n and 0 <= nc < n and not burned[nr, nc]:
+                        spread_prob = 0.4 * (1.0 - moisture[nr, nc])
+                        if rng.random() < spread_prob:
+                            burned[nr, nc] = True
+                            new_active.append((nr, nc))
+            active = new_active
 
-            seed_production = density * genome["growth_rate"] * 0.3 * seed_multiplier
+        return burned
 
-            # Local dispersal (kernel radius scales with seed lightness)
-            dispersal_radius = 1 + int(2 * (1.0 - genome["seed_mass"]))
-            seed_input = _disperse(seed_production, dispersal_radius)
-
-            # Long-distance dispersal scaled by seed_mass.
-            # Light seeds (low mass) = wind/bird carried, frequent long jumps.
-            # Heavy seeds (high mass) = gravity/mammal, rare short jumps.
-            # This bridges gaps that would otherwise cause false fragmentation.
-            seed_mass = genome["seed_mass"]
-            ldd_probability = 0.4 * (1.0 - seed_mass)  # 0-40% chance per tick
-            if rng.random() < ldd_probability:
-                # Number of landing sites scales with lightness
-                ldd_count = int(rng.integers(2, 6 + int(10 * (1.0 - seed_mass))))
-                # Max jump distance scales inversely with mass
-                max_jump = int(n * (0.1 + 0.4 * (1.0 - seed_mass)))  # 10-50% of grid
-                for _ in range(ldd_count):
-                    # Pick a source cell with high density
-                    source_cells = np.argwhere(density > 1.0)
-                    if len(source_cells) == 0:
-                        break
-                    src_idx = int(rng.integers(0, len(source_cells)))
-                    sr, sc = source_cells[src_idx]
-                    # Jump in random direction
-                    dr = int(rng.integers(-max_jump, max_jump + 1))
-                    dc = int(rng.integers(-max_jump, max_jump + 1))
-                    tr = int(np.clip(sr + dr, 0, n - 1))
-                    tc = int(np.clip(sc + dc, 0, n - 1))
-                    # Deposit seeds (amount scales with source density)
-                    deposit = float(density[sr, sc]) * 0.01 * rng.uniform(0.5, 2.0)
-                    seed_input[tr, tc] += deposit
-
-            # Seed bank: decay + input
-            half_life = 5.0 + genome["seed_mass"] * 195.0
-            decay = 0.5 ** (0.25 / half_life)  # seasonal decay
-            sb = seed_banks.get(sid, np.zeros((n, n), dtype=np.float64))
-            seed_banks[sid] = np.clip(sb * decay + seed_input * 0.3, 0.0, None)
-
-    def _senescence_and_fuel(self, weather: SeasonalWeather, species_list: list, densities: dict) -> None:
-        """Deciduous species drop leaves. Fuel accumulates for next summer's fire."""
-        # Fuel load is implicit via density — higher density = more fuel for fire spread
-        # Deciduous species (low evergreenness) lose some density in fall as leaf drop
-        # This is a minor effect — mainly narrative/future use
-        pass  # Fuel is computed from density at fire time; no explicit fuel layer yet
+    # ── blowdown disturbance ──────────────────────────────────────
 
     def _blowdown_disturbance(
         self,
@@ -906,117 +924,52 @@ class EcologyTier:
                                 self._world.events.kill_individual(ind["individual_id"], current_year)
                                 self._world.events.update_individual_state(ind["individual_id"], "snag")
 
-    # ── fire spread ──────────────────────────────────────────────
+    # ── extinction ────────────────────────────────────────────────
 
-    def _spread_fire(
+    def _check_extinction(
         self,
-        start_row: int,
-        start_col: int,
-        moisture: NDArray[np.float64],
-        rng: np.random.Generator,
-    ) -> NDArray[np.bool_]:
-        """Spread fire from ignition point. Returns boolean burned mask."""
-        n = self.GRID_SIZE
-        burned = np.zeros((n, n), dtype=bool)
-        burned[start_row, start_col] = True
-        active = [(start_row, start_col)]
+        species_list: list,
+        densities: dict,
+        tick_num: int,
+    ) -> None:
+        """Remove species below minimum viable population via demographic stochasticity.
 
-        max_cells = int(rng.integers(20, 200))
-
-        while active and burned.sum() < max_cells:
-            new_active: list[tuple[int, int]] = []
-            for r, c in active:
-                for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                    nr, nc = r + dr, c + dc
-                    if 0 <= nr < n and 0 <= nc < n and not burned[nr, nc]:
-                        spread_prob = 0.4 * (1.0 - moisture[nr, nc])
-                        if rng.random() < spread_prob:
-                            burned[nr, nc] = True
-                            new_active.append((nr, nc))
-            active = new_active
-
-        return burned
-
-    # ── cumulative drought stress ─────────────────────────────────
-
-    def _load_drought_stress(self) -> NDArray[np.float64]:
-        store = self._world.rasters
-        try:
-            if "drought_stress" in store.list_layers(TIER):
-                return store.read_layer(TIER, "drought_stress").copy()
-        except Exception:
-            pass
-        return np.zeros((self.GRID_SIZE, self.GRID_SIZE), dtype=np.float64)
-
-    def _get_base_precipitation(self) -> NDArray[np.float64]:
-        """Return the base climate precipitation (terrain-modulated, no weather anomaly).
-
-        This is the precipitation field written by ClimateHydrologyTier at world
-        creation — the long-term average that weather anomalies perturb around.
-        Cached after first read.
+        Species with very low total density face increasing extinction probability.
+        This prevents indefinite persistence of near-zero populations.
         """
-        if not hasattr(self, "_base_precip_cache"):
-            store = self._world.rasters
-            if "precipitation" in store.list_layers("climate_hydrology"):
-                self._base_precip_cache = store.read_layer(
-                    "climate_hydrology", "precipitation"
-                ).copy()
-            else:
-                # Fallback: use a uniform baseline
-                self._base_precip_cache = np.full(
-                    (self.GRID_SIZE, self.GRID_SIZE), 800.0, dtype=np.float64
-                )
-        return self._base_precip_cache
+        rng = create_rng(self._world.seed, "ecology", "extinction", tick_num)
+        current_year = self._world.tier_clocks[TIER].simulated_year
 
-    def _update_cumulative_drought(self, weather: SeasonalWeather) -> None:
-        drought = self._load_drought_stress()
-        if weather.season == 2:  # Summer
-            # Compare current precipitation to the fixed base climate envelope.
-            # This makes drought stress accumulate during genuinely dry epochs
-            # rather than self-cancelling against the shifted mean.
-            base_precip = self._get_base_precipitation()
-            # Relative deficit: how far below the base each cell is (0 if above)
-            deficit = np.clip(1.0 - weather.precipitation / (base_precip + 1e-10), 0, None)
-            drought = drought * 0.7 + deficit * 0.3
-        else:
-            drought *= 0.9  # slow recovery
-        drought = np.clip(drought, 0.0, 1.0)
-        self._world.rasters.write_layer(
-            TIER, "drought_stress", drought.astype(np.float64),
-            self._world.tier_clocks[TIER].tick_number,
-        )
+        mvp_density = 5.0  # minimum total density across all cells
+        mvp_cells = 10  # minimum occupied cells
 
-    # ── biomass age tracking ──────────────────────────────────────
-
-    def _load_biomass_age(self) -> dict[str, NDArray[np.float64]]:
-        store = self._world.rasters
-        ages: dict[str, NDArray[np.float64]] = {}
-        ecology_layers = store.list_layers(TIER)
-        for sp in self._world.events.list_species():
-            sid = sp["species_id"]
-            layer = f"biomass_age_{sid}"
-            if layer in ecology_layers:
-                ages[sid] = store.read_layer(TIER, layer).copy()
-        return ages
-
-    def _update_biomass_age(self, species_list: list, densities: dict) -> None:
-        store = self._world.rasters
-        tick_num = self._world.tier_clocks[TIER].tick_number
-        ecology_layers = store.list_layers(TIER)
+        to_remove: list[str] = []
 
         for sp in species_list:
             sid = sp["species_id"]
-            layer = f"biomass_age_{sid}"
-            if layer in ecology_layers:
-                age = store.read_layer(TIER, layer).copy()
-            else:
-                age = np.zeros((self.GRID_SIZE, self.GRID_SIZE), dtype=np.float64)
+            density = densities[sid]
+            total = float(density.sum())
+            occupied = int((density > 0.01).sum())
 
-            # Accumulate with density, decay where density is low
-            age += densities[sid] * 0.25  # 0.25 years per tick
-            age = np.where(densities[sid] < 0.01, age * 0.9, age)  # decay where absent
+            # Deterministic extinction: zero density
+            if total <= 0.01 and occupied == 0:
+                to_remove.append(sid)
+                continue
 
-            store.write_layer(TIER, layer, age.astype(np.float64), tick_num)
+            if total < mvp_density or occupied < mvp_cells:
+                # Extinction probability increases as population shrinks
+                if total <= 0:
+                    ext_prob = 1.0
+                else:
+                    ext_prob = 1.0 - (total / mvp_density)
+                    ext_prob = float(np.clip(ext_prob, 0.05, 0.9))
+
+                if rng.random() < ext_prob:
+                    to_remove.append(sid)
+
+        for sid in to_remove:
+            densities[sid][:] = 0.0
+            self._world.events.mark_species_extinct(sid, current_year)
 
     # ── individual lifecycle ────────────────────────────────────────
 
@@ -1066,259 +1019,6 @@ class EcologyTier:
                 if died_year is not None and (current_year - died_year) > 260:  # 10+50+200
                     self._world.events.update_individual_state(ind["individual_id"], "removed")
 
-    # ── state loading / writing ───────────────────────────────────
-
-    def _load_species_state(
-        self, species_list: list,
-    ) -> tuple[dict[str, NDArray[np.float64]], dict[str, NDArray[np.float64]]]:
-        store = self._world.rasters
-        n = self.GRID_SIZE
-        ecology_layers = store.list_layers(TIER)
-        densities: dict[str, NDArray[np.float64]] = {}
-        seed_banks: dict[str, NDArray[np.float64]] = {}
-
-        for sp in species_list:
-            sid = sp["species_id"]
-            layer = f"species_{sid}_density"
-            if layer in ecology_layers:
-                densities[sid] = store.read_layer(TIER, layer).copy()
-            else:
-                densities[sid] = np.zeros((n, n), dtype=np.float64)
-
-            sb_layer = f"seed_bank_{sid}"
-            if sb_layer in ecology_layers:
-                seed_banks[sid] = store.read_layer(TIER, sb_layer).copy()
-            else:
-                seed_banks[sid] = np.zeros((n, n), dtype=np.float64)
-
-        return densities, seed_banks
-
-    def _write_species_state(
-        self,
-        species_list: list,
-        densities: dict,
-        seed_banks: dict,
-        tick_num: int,
-    ) -> None:
-        store = self._world.rasters
-        n = self.GRID_SIZE
-        seed_bank_total = np.zeros((n, n), dtype=np.float64)
-
-        for sp in species_list:
-            sid = sp["species_id"]
-            store.write_layer(
-                TIER, f"species_{sid}_density",
-                densities[sid].astype(np.float64), tick_num,
-            )
-            sb = seed_banks.get(sid, np.zeros((n, n), dtype=np.float64))
-            store.write_layer(
-                TIER, f"seed_bank_{sid}", sb.astype(np.float64), tick_num,
-            )
-            seed_bank_total += sb
-
-        store.write_layer(TIER, "seed_bank_total", seed_bank_total.astype(np.float64), tick_num)
-
-    def _enforce_carrying_capacity(self, densities: dict) -> None:
-        """Enforce carrying capacity with niche-overlap competition.
-
-        Species with similar genomes compete harder (higher alpha) than
-        species with different genomes.  Each species experiences an
-        effective competition load that weights other species' densities
-        by their niche overlap.  If a species' effective load exceeds K,
-        its density is scaled down.
-        """
-        n = self.GRID_SIZE
-        carrying_capacity = 15.0
-
-        # Precompute genomes and pairwise alphas
-        sids = list(densities.keys())
-        genomes = {
-            sid: self._world.events.get_species(sid)["genome"]
-            for sid in sids
-        }
-        # Cache alpha matrix (symmetric)
-        alphas: dict[tuple[str, str], float] = {}
-        for i, s1 in enumerate(sids):
-            for j, s2 in enumerate(sids):
-                if j < i:
-                    alphas[(s1, s2)] = alphas[(s2, s1)]
-                elif s1 == s2:
-                    alphas[(s1, s2)] = 1.0
-                else:
-                    dist = self._genome_distance(genomes[s1], genomes[s2])
-                    alphas[(s1, s2)] = self._competition_alpha(dist)
-
-        # For each species, compute effective competition load
-        for sid in sids:
-            effective_load = np.zeros((n, n), dtype=np.float64)
-            for other_sid in sids:
-                alpha = alphas[(sid, other_sid)]
-                if alpha > 0.01:  # skip negligible interactions
-                    effective_load += alpha * densities[other_sid]
-
-            # Scale down where effective load exceeds K
-            excess_mask = effective_load > carrying_capacity
-            if excess_mask.any():
-                scale = np.where(
-                    excess_mask,
-                    carrying_capacity / (effective_load + 1e-10),
-                    1.0,
-                )
-                densities[sid] *= scale
-                densities[sid] = np.clip(densities[sid], 0.0, None)
-
-    # ── biotic pressure (Janzen-Connell proxy) ─────────────────────
-
-    def _apply_biotic_pressure(
-        self,
-        species_list: list,
-        densities: dict,
-        weather: SeasonalWeather,
-    ) -> None:
-        """Oscillating top-down pressure from pathogens/herbivores/fungi.
-
-        Pressure accumulates when a species (or its close relatives) is abundant,
-        and decays when rare.  Applied as density-dependent mortality.
-        This creates boom-bust cycles without explicit animal agents.
-
-        Climate responsiveness: warm + wet conditions favour pathogens (faster
-        pressure buildup), cold + dry conditions suppress them (faster decay).
-        """
-        # Load current pressure state
-        pressures = self._world.events.get_biotic_pressures()
-
-        # Precompute genome distance between all alive species for shared pressure
-        genomes: dict[str, dict] = {}
-        for sp in species_list:
-            sid = sp["species_id"]
-            genomes[sid] = self._world.events.get_species(sid)["genome"]
-
-        # Base parameters — tuned for a 1000x1000 grid where a healthy species
-        # has ~10,000-50,000 total density across all cells.
-        growth_k = 0.0005  # how fast pressure builds per unit density above baseline
-        decay_rate = 0.95  # pressure decays by 5% per tick when species is sparse
-        relatedness_threshold = 0.5  # genome distance below which pressure is shared
-        max_pressure = 1.0  # cap to prevent runaway
-        mortality_strength = 0.08  # max mortality fraction at full pressure
-
-        # Climate modulation — warm + wet = pathogen-friendly
-        mean_temp = float(weather.temperature.mean())
-        mean_precip = float(weather.precipitation.mean())
-        temp_factor = float(np.clip((mean_temp - 2.0) / 16.0, 0, 1))    # 2°C→0, 18°C→1
-        precip_factor = float(np.clip(mean_precip / 2000.0, 0, 1))      # 0mm→0, 2000mm→1
-        pathogen_favorability = temp_factor * precip_factor               # 0 to 1
-
-        # Modulate: growth_k 50%-150% of base, decay faster when unfavorable
-        growth_k = growth_k * (0.5 + pathogen_favorability)
-        decay_rate = decay_rate + (1.0 - decay_rate) * 0.5 * (1.0 - pathogen_favorability)
-
-        # Precompute per-species suitability for climate-modulated baseline.
-        # In favorable climate, a species can sustain higher density before
-        # pathogens build up; in unfavorable climate, the threshold drops
-        # and pressure kicks in earlier.  This makes biotic pressure an
-        # amplifier of climate signal rather than a suppressor.
-        baseline_min = 5000.0
-        baseline_max = 20000.0
-        species_baselines: dict[str, float] = {}
-        for sp in species_list:
-            sid = sp["species_id"]
-            suit = self._compute_suitability_from_weather(genomes[sid], weather)
-            mean_suit = float(suit.mean())
-            species_baselines[sid] = baseline_min + (baseline_max - baseline_min) * mean_suit
-
-        # Update pressure for each species
-        for sp in species_list:
-            sid = sp["species_id"]
-            density = densities[sid]
-            total_density = float(density.sum())
-            baseline_density = species_baselines[sid]
-
-            current_pressure = pressures.get(sid, 0.0)
-
-            # Accumulate or decay based on total density
-            if total_density > baseline_density:
-                # Pressure grows proportional to excess density
-                excess = (total_density - baseline_density) / baseline_density
-                current_pressure += growth_k * excess
-            else:
-                # Pressure decays when species is rare
-                current_pressure *= decay_rate
-
-            # Add shared pressure from close relatives (same pathogen pool)
-            shared = 0.0
-            for other_sp in species_list:
-                other_sid = other_sp["species_id"]
-                if other_sid == sid:
-                    continue
-                dist = self._genome_distance(genomes[sid], genomes[other_sid])
-                if dist < relatedness_threshold:
-                    # Closer relatives share more pressure
-                    share_weight = 1.0 - (dist / relatedness_threshold)
-                    other_density = float(densities[other_sid].sum())
-                    other_baseline = species_baselines.get(other_sid, baseline_max)
-                    if other_density > other_baseline:
-                        shared += share_weight * growth_k * 0.3 * (
-                            (other_density - other_baseline) / other_baseline
-                        )
-            current_pressure += shared
-
-            # Clamp
-            current_pressure = min(current_pressure, max_pressure)
-            pressures[sid] = current_pressure
-
-            # Apply mortality from pressure
-            if current_pressure > 0.01:
-                mortality = mortality_strength * current_pressure
-                densities[sid] *= (1.0 - mortality)
-
-        # Persist updated pressures
-        self._world.events.set_biotic_pressures(pressures)
-
-    # ── extinction ────────────────────────────────────────────────
-
-    def _check_extinction(
-        self,
-        species_list: list,
-        densities: dict,
-        seed_banks: dict,
-        tick_num: int,
-    ) -> None:
-        """Remove species below minimum viable population via demographic stochasticity.
-
-        Species with very low total density face increasing extinction probability.
-        This prevents indefinite persistence of near-zero populations.
-        """
-        rng = create_rng(self._world.seed, "ecology", "extinction", tick_num)
-        current_year = self._world.tier_clocks[TIER].simulated_year
-
-        mvp_density = 5.0  # minimum total density across all cells
-        mvp_cells = 10  # minimum occupied cells
-
-        to_remove: list[str] = []
-
-        for sp in species_list:
-            sid = sp["species_id"]
-            density = densities[sid]
-            total = float(density.sum())
-            occupied = int((density > 0.01).sum())
-
-            if total < mvp_density or occupied < mvp_cells:
-                # Extinction probability increases as population shrinks
-                if total <= 0:
-                    ext_prob = 1.0
-                else:
-                    ext_prob = 1.0 - (total / mvp_density)
-                    ext_prob = float(np.clip(ext_prob, 0.05, 0.9))
-
-                if rng.random() < ext_prob:
-                    to_remove.append(sid)
-
-        for sid in to_remove:
-            densities[sid][:] = 0.0
-            if sid in seed_banks:
-                seed_banks[sid][:] = 0.0
-            self._world.events.mark_species_extinct(sid, current_year)
-
     # ── distinguished individuals ─────────────────────────────────
 
     def _promote_individuals(self, tick_number: int) -> None:
@@ -1330,6 +1030,11 @@ class EcologyTier:
 
         for sp in species_list:
             sid = sp["species_id"]
+            genome = self._world.events.get_species(sid)["genome"]
+            # Only promote trees (max_height > 10m) to DI status.
+            # Shrubs/forbs are too small and numerous to be narratively meaningful.
+            if genome.get("max_height", 0) <= 10:
+                continue
             layer_name = f"species_{sid}_density"
             if layer_name not in store.list_layers(TIER):
                 continue
@@ -1374,22 +1079,29 @@ class EcologyTier:
         # Niche saturation: speciation gets harder as niches fill up.
         alive_count = len(species_list)
         saturation_factor = max(0.1, 1.0 - alive_count / 100.0)
-        base_speciation_prob = 0.15 * saturation_factor
+        base_speciation_prob = 0.08 * saturation_factor  # lower base prob for ~500yr average
 
         min_genome_divergence = 0.15  # reject speciation if daughter too similar
-        pressure_inheritance = 0.6   # daughter inherits 60% of parent's pressure
 
-        # Load pressure state so daughters can inherit parent pressure
-        pressures = self._world.events.get_biotic_pressures()
-        pressures_changed = False
+        # Height-dependent speciation multiplier:
+        # Tall trees speciate most readily (limited dispersal can't bridge barriers)
+        # Short plants rarely speciate (wide dispersal maintains gene flow)
+        def _height_speciation_mult(max_height: float) -> float:
+            if max_height > 15:
+                return 2.0  # canopy tree
+            elif max_height > 5:
+                return 1.5  # understory tree
+            elif max_height > 1.5:
+                return 1.0  # shrub
+            else:
+                return 0.5  # forb/grass
 
         for sp in species_list:
             sid = sp["species_id"]
 
-            # Cooldown: species must be at least 100 years old to speciate.
-            # Young species need time to establish identity before fragmenting.
+            # Cooldown: species must be at least 300 years old to speciate.
             species_age = current_year - sp.get("appeared_year", 0.0)
-            if species_age < 100.0:
+            if species_age < 300.0:
                 continue
 
             layer_name = f"species_{sid}_density"
@@ -1397,7 +1109,7 @@ class EcologyTier:
                 continue
             density = store.read_layer(TIER, layer_name).copy()
 
-            # Find occupied cells — species must be substantial to fragment.
+            # Find occupied cells -- species must be substantial to fragment.
             occupied = density > 0.1
             if occupied.sum() < 500:
                 continue
@@ -1416,11 +1128,9 @@ class EcologyTier:
             main_component = int(np.argmax(component_sizes)) + 1
 
             # Compute suitability on downsampled grid for barrier check.
-            # A fragment separated only by hospitable terrain (suitability > 0.2)
-            # is not behind a real barrier — dispersal will reconnect it.
             parent_genome = self._world.events.get_species(sid)["genome"]
             if weather is not None:
-                suit_full = self._compute_suitability_from_weather(parent_genome, weather)
+                suit_full = self._compute_suitability(parent_genome, weather)
                 ds = 10  # must match downsample used for components
                 cr, cc = suit_full.shape[0] // ds, suit_full.shape[1] // ds
                 suit_coarse = (
@@ -1442,23 +1152,31 @@ class EcologyTier:
                     continue
 
                 # Barrier check: reject if fragment connects to main through
-                # hospitable terrain.  Only real environmental barriers
-                # (mountains, drought zones) should allow speciation.
+                # hospitable terrain.
                 if hospitable_coarse is not None:
                     frag_coarse = components[::ds, ::ds][:cr, :cc] == c
                     if _fragments_connect_through_hospitable(
                         frag_coarse, main_mask_coarse, hospitable_coarse
                     ):
-                        continue  # no barrier — skip this fragment
+                        continue  # no barrier -- skip this fragment
 
-                if rng.random() < base_speciation_prob:
+                # Apply height-dependent probability
+                max_height = parent_genome.get("max_height", 1.0)
+                height_mult = _height_speciation_mult(max_height)
+
+                if rng.random() < base_speciation_prob * height_mult:
                     # ── Adaptive drift: bias toward local environment ──
-                    # Compute mean environmental conditions over the fragment
                     local_env: dict[str, float] = {}
                     if weather is not None:
-                        precip_norm = np.clip(weather.precipitation / 2000.0, 0, 1)
-                        local_drought = float((1.0 - precip_norm)[fragment_mask].mean())
-                        temp_norm = np.clip((weather.temperature - (-10)) / 30.0, 0, 1)
+                        drought_stress = 1.0 - np.clip(
+                            weather.precipitation / PRECIP_REF_MAX, 0, 1
+                        )
+                        local_drought = float(drought_stress[fragment_mask].mean())
+                        temp_norm = np.clip(
+                            (weather.temperature - TEMP_REF_MIN)
+                            / (TEMP_REF_MAX - TEMP_REF_MIN),
+                            0, 1,
+                        )
                         local_warmth = float(temp_norm[fragment_mask].mean())
                         local_env["drought_tolerance"] = local_drought
                         local_env["frost_tolerance"] = 1.0 - local_warmth
@@ -1467,24 +1185,15 @@ class EcologyTier:
 
                     new_genome: dict = {}
                     for key, val in parent_genome.items():
-                        if key == "growth_form":
-                            # Discrete: 10% chance of shifting +-1
-                            new_val = int(val)
-                            if rng.random() < 0.1:
-                                new_val += int(rng.choice([-1, 1]))
-                            new_genome[key] = int(np.clip(new_val, 0, 4))
-                        elif key == "mast_interval":
+                        if key == "dispersal_range":
                             # Integer: +-1 with 20% probability
                             new_val = int(val)
                             if rng.random() < 0.2:
                                 new_val += int(rng.choice([-1, 1]))
-                            new_genome[key] = int(np.clip(new_val, 1, 7))
-                        elif key in _MORPHOLOGICAL_TRAITS:
-                            # Higher variance for visual divergence
-                            drift = float(rng.normal(0, 0.15))
-                            new_genome[key] = float(np.clip(val + drift, 0.0, 1.0))
-                        elif key in _BOUNDED_FUNCTIONAL:
-                            # Adaptive drift: bias toward local environment
+                            new_genome[key] = int(np.clip(new_val, 1, 6))
+                        elif key in ("drought_tolerance", "frost_tolerance",
+                                     "growth_rate"):
+                            # Bounded functional traits: adaptive drift
                             bias = 0.0
                             if key in local_env:
                                 bias = (local_env[key] - val) * adapt_strength
@@ -1496,8 +1205,6 @@ class EcologyTier:
                             new_genome[key] = max(0.1, val + val * drift)
 
                     # Reject speciation if daughter isn't genetically distinct enough.
-                    # Geographic separation alone doesn't make a new species —
-                    # the fragment must have diverged under different selection pressure.
                     divergence = self._genome_distance(new_genome, parent_genome)
                     if divergence < min_genome_divergence:
                         continue
@@ -1506,13 +1213,6 @@ class EcologyTier:
                     self._world.events.add_species(
                         new_id, new_genome, parent_id=sid, appeared_year=current_year
                     )
-
-                    # Daughter inherits a fraction of parent's pathogen pressure.
-                    # Speciation doesn't grant a clean escape from the pathogen shadow.
-                    parent_pressure = pressures.get(sid, 0.0)
-                    if parent_pressure > 0.01:
-                        pressures[new_id] = parent_pressure * pressure_inheritance
-                        pressures_changed = True
 
                     # Transfer fragment density to new species.
                     new_density = np.where(fragment_mask, density, 0.0)
@@ -1524,19 +1224,9 @@ class EcologyTier:
                         new_density.astype(np.float64),
                         tick_number,
                     )
-                    store.write_layer(
-                        TIER,
-                        f"seed_bank_{new_id}",
-                        np.zeros_like(new_density),
-                        tick_number,
-                    )
 
             # Update parent density (fragments removed).
             store.write_layer(TIER, layer_name, density.astype(np.float64), tick_number)
-
-        # Persist inherited pressure for any new daughter species.
-        if pressures_changed:
-            self._world.events.set_biotic_pressures(pressures)
 
     # ── gene flow / reabsorption ─────────────────────────────────
 
@@ -1556,7 +1246,7 @@ class EcologyTier:
 
         max_reabsorption_distance = 0.25  # must be below niche_width (0.3)
         min_overlap_fraction = 0.2  # 20% of smaller species' range must overlap
-        min_species_age = 100.0  # years — prevent immediate reabsorption after speciation
+        min_species_age = 300.0  # years -- prevent immediate reabsorption after speciation
 
         # Load genomes and densities for all living species.
         species_data: list[dict] = []
@@ -1584,22 +1274,10 @@ class EcologyTier:
         if len(species_data) < 2:
             return
 
-        # Pre-compute suitability for barrier checks (same logic as speciation).
-        hospitable_coarse = None
         ds = 10
-        if weather is not None:
-            # We need hospitable terrain per-pair, but a general hospitable map
-            # (using mean suitability of both species) is a reasonable proxy.
-            # Use a fixed moderate genome for the hospitable check.
-            suit_full = np.clip(weather.precipitation / 2000.0, 0, 1)  # moisture proxy
-            cr, cc = suit_full.shape[0] // ds, suit_full.shape[1] // ds
-            # Use actual suitability: a cell is hospitable if either species
-            # could survive there.  We'll compute per-pair below.
 
         # Find candidate pairs (sorted by genome distance, closest first).
         absorbed: set[str] = set()  # track already-absorbed species this tick
-        pressures = self._world.events.get_biotic_pressures()
-        pressures_changed = False
 
         for i in range(len(species_data)):
             if species_data[i]["species_id"] in absorbed:
@@ -1632,11 +1310,9 @@ class EcologyTier:
                     continue
 
                 # Barrier check: can the two populations reach each other
-                # through hospitable terrain?  If a barrier separates them,
-                # they stay distinct (geographic isolation persists).
+                # through hospitable terrain?
                 if weather is not None:
-                    # Compute suitability for the absorber species on coarse grid.
-                    suit_full = self._compute_suitability_from_weather(
+                    suit_full = self._compute_suitability(
                         absorber["genome"], weather
                     )
                     cr, cc = suit_full.shape[0] // ds, suit_full.shape[1] // ds
@@ -1647,7 +1323,6 @@ class EcologyTier:
                     )
                     hospitable_coarse = suit_coarse > 0.2
 
-                    # Treat absorber's range as "main" and absorbed's as "fragment".
                     absorber_coarse = absorber["occupied"][::ds, ::ds][:cr, :cc]
                     absorbed_coarse = absorbed_sp["occupied"][::ds, ::ds][:cr, :cc]
 
@@ -1661,14 +1336,14 @@ class EcologyTier:
                 absorbed_sid = absorbed_sp["species_id"]
 
                 # Gene flow: shift absorber genome toward absorbed, weighted
-                # by population ratio.  Small absorbed population = small shift.
+                # by population ratio.
                 pop_ratio = absorbed_sp["total"] / (absorber["total"] + absorbed_sp["total"])
                 gene_flow_weight = pop_ratio * 0.5  # dampen to prevent large jumps
                 updated_genome = {}
                 for key, val in absorber["genome"].items():
                     absorbed_val = absorbed_sp["genome"].get(key, val)
-                    if key in ("growth_form", "mast_interval"):
-                        # Discrete traits: keep absorber's value
+                    if key == "dispersal_range":
+                        # Discrete trait: keep absorber's value
                         updated_genome[key] = val
                     else:
                         # Continuous traits: weighted average
@@ -1683,19 +1358,8 @@ class EcologyTier:
                 merged_density = absorber_density + absorbed_density
                 store.write_layer(TIER, absorber_layer, merged_density.astype(np.float64), tick_number)
 
-                # Zero out absorbed species' density and seed bank.
+                # Zero out absorbed species' density.
                 store.write_layer(TIER, absorbed_layer, np.zeros_like(absorbed_density), tick_number)
-                sb_layer = f"seed_bank_{absorbed_sid}"
-                if sb_layer in store.list_layers(TIER):
-                    store.write_layer(TIER, sb_layer, np.zeros_like(absorbed_density), tick_number)
-
-                # Merge biotic pressure (weighted average).
-                p_absorber = pressures.get(absorber_sid, 0.0)
-                p_absorbed = pressures.get(absorbed_sid, 0.0)
-                pressures[absorber_sid] = p_absorber + (p_absorbed - p_absorber) * pop_ratio
-                if absorbed_sid in pressures:
-                    del pressures[absorbed_sid]
-                pressures_changed = True
 
                 # Mark absorbed species extinct.
                 self._world.events.mark_species_extinct(absorbed_sid, current_year)
@@ -1707,5 +1371,39 @@ class EcologyTier:
                 absorber["occupied"] = merged_density > 0.1
                 absorber["genome"] = updated_genome
 
-        if pressures_changed:
-            self._world.events.set_biotic_pressures(pressures)
+    # ── state loading / writing ───────────────────────────────────
+
+    def _load_species_state(
+        self, species_list: list,
+    ) -> dict[str, NDArray[np.float64]]:
+        """Load density arrays for all living species."""
+        store = self._world.rasters
+        n = self.GRID_SIZE
+        ecology_layers = store.list_layers(TIER)
+        densities: dict[str, NDArray[np.float64]] = {}
+
+        for sp in species_list:
+            sid = sp["species_id"]
+            layer = f"species_{sid}_density"
+            if layer in ecology_layers:
+                densities[sid] = store.read_layer(TIER, layer).copy()
+            else:
+                densities[sid] = np.zeros((n, n), dtype=np.float64)
+
+        return densities
+
+    def _write_species_state(
+        self,
+        species_list: list,
+        densities: dict,
+        tick_num: int,
+    ) -> None:
+        """Write density arrays for all living species."""
+        store = self._world.rasters
+
+        for sp in species_list:
+            sid = sp["species_id"]
+            store.write_layer(
+                TIER, f"species_{sid}_density",
+                densities[sid].astype(np.float64), tick_num,
+            )

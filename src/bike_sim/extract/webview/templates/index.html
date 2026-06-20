@@ -545,6 +545,7 @@
   function categorizeLayer(tier, name) {
     if (tier === "geology") return "Terrain";
     if (tier === "climate_hydrology") return "Climate";
+    if (tier === "ride") return "Ride";
     if (tier === "ecology") {
       if (name.match(/^species_.*_density$/)) return "Species";
       if (name.match(/^seed_bank/)) return null;    // skip
@@ -562,7 +563,7 @@
     return name.replace(/_/g, " ");
   }
 
-  var tabOrder = ["Terrain", "Climate", "Ecology", "Species"];
+  var tabOrder = ["Terrain", "Climate", "Ecology", "Species", "Ride"];
   var activeTab = tabOrder[0];  // Track which tab is selected
 
   // Track which layer keys the user has toggled on, so flipbook preserves them.

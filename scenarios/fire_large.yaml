@@ -1,0 +1,7 @@
+name: fire_large
+description: "Single large fire near the world center (95% kill), then recovery."
+weather_mode: frozen
+sustained: []
+shocks:
+  - {type: fire, location: [500, 500], radius: 120, kill: 0.95}
+run_years: 300

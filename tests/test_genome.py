@@ -1,15 +1,19 @@
-"""Tests for genome expansion: 17 traits (10 functional + 7 morphological).
+"""Tests for genome: 6 core traits after ecology tick refactor.
 
-Step 2 of the seasonal redesign expands species genomes from 7 traits to 17.
-These tests verify trait completeness, value ranges, morphological coupling,
-ancestor template values, speciation drift integrity, and determinism.
+The minimum viable genome has 6 traits, each mapping to exactly one mechanism:
+  - drought_tolerance, frost_tolerance, growth_rate (bounded [0,1])
+  - max_height, lifespan (positive, unbounded)
+  - dispersal_range (integer, [1,6])
+
+These tests verify trait completeness, value ranges, ancestor template values,
+speciation drift integrity, and determinism.
 """
 
 import numpy as np
 import pytest
 
 from bike_sim.tiers.climate_hydrology import ClimateHydrologyTier
-from bike_sim.tiers.ecology import EcologyTier
+from bike_sim.tiers.ecology import EcologyTier, _CORE_TRAITS
 from bike_sim.tiers.geology import GeologyTier
 from bike_sim.weather import SeasonalWeather, WeatherSystem
 from bike_sim.world import World
@@ -18,51 +22,14 @@ from bike_sim.tiers.erosion import ErosionParams
 
 FAST_EROSION = ErosionParams(num_particles=100, max_lifetime=30)
 
-# The full set of expected genome traits after expansion.
-FUNCTIONAL_TRAITS = {
-    "drought_tolerance",
-    "frost_tolerance",
-    "shade_tolerance",
-    "growth_rate",
-    "seed_mass",
-    "max_height",
-    "lifespan",
-    "phenological_aggressiveness",
-    "evergreenness",
-    "mast_interval",
-}
-
-MORPHOLOGICAL_TRAITS = {
-    "growth_form",
-    "leaf_size",
-    "leaf_shape",
-    "flower_color",
-    "flower_size",
-    "bark_texture",
-    "stem_woodiness",
-}
-
-ALL_TRAITS = FUNCTIONAL_TRAITS | MORPHOLOGICAL_TRAITS
+# The full set of expected genome traits.
+ALL_TRAITS = set(_CORE_TRAITS)
 
 # Functional traits that must be bounded to [0, 1].
 BOUNDED_FUNCTIONAL = {
     "drought_tolerance",
     "frost_tolerance",
-    "shade_tolerance",
     "growth_rate",
-    "seed_mass",
-    "phenological_aggressiveness",
-    "evergreenness",
-}
-
-# Morphological traits that are continuous floats in [0, 1].
-MORPHOLOGICAL_FLOATS = {
-    "leaf_size",
-    "leaf_shape",
-    "flower_color",
-    "flower_size",
-    "bark_texture",
-    "stem_woodiness",
 }
 
 
@@ -75,7 +42,7 @@ MORPHOLOGICAL_FLOATS = {
 def eco_world(tmp_path_factory):
     """Create a world with geology + climate + ecology ticked once.
 
-    Module-scoped for speed — tests must not mutate the world.
+    Module-scoped for speed -- tests must not mutate the world.
     """
     tmp = tmp_path_factory.mktemp("genome")
     w = World.create(tmp / "world", seed=42)
@@ -134,33 +101,21 @@ def multi_tick_world(tmp_path_factory):
 
 
 class TestGenomeCompleteness:
-    def test_every_genome_has_17_traits(self, species_genomes):
-        """Every species genome must have exactly 17 traits."""
+    def test_every_genome_has_6_traits(self, species_genomes):
+        """Every species genome must have exactly 6 traits."""
         for sid, genome in species_genomes.items():
-            assert len(genome) == 17, (
-                f"Species {sid} has {len(genome)} traits, expected 17. "
+            assert len(genome) == 6, (
+                f"Species {sid} has {len(genome)} traits, expected 6. "
                 f"Keys: {sorted(genome.keys())}"
             )
 
     def test_all_expected_trait_names_present(self, species_genomes):
-        """Every genome must contain all expected functional and morphological trait names."""
+        """Every genome must contain all expected trait names."""
         for sid, genome in species_genomes.items():
             missing = ALL_TRAITS - genome.keys()
             extra = genome.keys() - ALL_TRAITS
             assert not missing, f"Species {sid} missing traits: {missing}"
             assert not extra, f"Species {sid} has unexpected traits: {extra}"
-
-    def test_functional_traits_present(self, species_genomes):
-        """All 10 functional traits are present in every genome."""
-        for sid, genome in species_genomes.items():
-            missing = FUNCTIONAL_TRAITS - genome.keys()
-            assert not missing, f"Species {sid} missing functional traits: {missing}"
-
-    def test_morphological_traits_present(self, species_genomes):
-        """All 7 morphological traits are present in every genome."""
-        for sid, genome in species_genomes.items():
-            missing = MORPHOLOGICAL_TRAITS - genome.keys()
-            assert not missing, f"Species {sid} missing morphological traits: {missing}"
 
 
 # ---------------------------------------------------------------------------
@@ -178,15 +133,15 @@ class TestTraitRanges:
                     f"Species {sid}: {trait}={val} outside [0, 1]"
                 )
 
-    def test_mast_interval_is_int_in_range(self, species_genomes):
-        """mast_interval must be an integer in [1, 7]."""
+    def test_dispersal_range_is_int_in_range(self, species_genomes):
+        """dispersal_range must be an integer in [1, 6]."""
         for sid, genome in species_genomes.items():
-            val = genome["mast_interval"]
+            val = genome["dispersal_range"]
             assert isinstance(val, int), (
-                f"Species {sid}: mast_interval={val} is {type(val).__name__}, expected int"
+                f"Species {sid}: dispersal_range={val} is {type(val).__name__}, expected int"
             )
-            assert 1 <= val <= 7, (
-                f"Species {sid}: mast_interval={val} outside [1, 7]"
+            assert 1 <= val <= 6, (
+                f"Species {sid}: dispersal_range={val} outside [1, 6]"
             )
 
     def test_max_height_positive(self, species_genomes):
@@ -203,137 +158,27 @@ class TestTraitRanges:
                 f"Species {sid}: lifespan={genome['lifespan']} is not positive"
             )
 
-    def test_growth_form_is_int_in_range(self, species_genomes):
-        """growth_form must be an integer in [0, 4]."""
-        for sid, genome in species_genomes.items():
-            val = genome["growth_form"]
-            assert isinstance(val, int), (
-                f"Species {sid}: growth_form={val} is {type(val).__name__}, expected int"
-            )
-            assert 0 <= val <= 4, (
-                f"Species {sid}: growth_form={val} outside [0, 4]"
-            )
-
-    def test_morphological_floats_in_unit_interval(self, species_genomes):
-        """Continuous morphological traits must be in [0, 1]."""
-        for sid, genome in species_genomes.items():
-            for trait in MORPHOLOGICAL_FLOATS:
-                val = genome[trait]
-                assert 0.0 <= val <= 1.0, (
-                    f"Species {sid}: {trait}={val} outside [0, 1]"
-                )
-
 
 # ---------------------------------------------------------------------------
-# 3. Morphological coupling (soft constraints across ancestors)
-# ---------------------------------------------------------------------------
-
-
-class TestMorphologicalCoupling:
-    """Soft tests for morphological-functional correlations across ancestors.
-
-    These test design intent: morphological traits should be loosely coupled
-    to functional traits so that species *look* like what they *are*.
-    """
-
-    def test_evergreenness_leaf_shape_negative_correlation(self, ancestor_genomes):
-        """High evergreenness should correlate with lower leaf_shape (needle-like).
-
-        We check that across the 6 ancestors, the Pearson correlation between
-        evergreenness and leaf_shape is negative.
-        """
-        evergreenness = [g["evergreenness"] for g in ancestor_genomes.values()]
-        leaf_shape = [g["leaf_shape"] for g in ancestor_genomes.values()]
-        corr = np.corrcoef(evergreenness, leaf_shape)[0, 1]
-        assert corr < 0, (
-            f"Expected negative correlation between evergreenness and leaf_shape, "
-            f"got r={corr:.3f}"
-        )
-
-    def test_lifespan_bark_texture_positive_correlation(self, ancestor_genomes):
-        """High lifespan should correlate with higher bark_texture (thick bark)."""
-        lifespan = [g["lifespan"] for g in ancestor_genomes.values()]
-        bark = [g["bark_texture"] for g in ancestor_genomes.values()]
-        corr = np.corrcoef(lifespan, bark)[0, 1]
-        assert corr > 0, (
-            f"Expected positive correlation between lifespan and bark_texture, "
-            f"got r={corr:.3f}"
-        )
-
-    def test_tall_species_are_trees_or_shrubs(self, ancestor_genomes):
-        """Species with high max_height should have growth_form 0 (tree) or 1 (shrub)."""
-        for sid, genome in ancestor_genomes.items():
-            if genome["max_height"] >= 3.0:
-                assert genome["growth_form"] in (0, 1), (
-                    f"Species {sid} has max_height={genome['max_height']} "
-                    f"but growth_form={genome['growth_form']} (expected 0=tree or 1=shrub)"
-                )
-
-    def test_short_species_are_not_trees(self, ancestor_genomes):
-        """Species with max_height < 0.5 should have growth_form 2, 3, or 4."""
-        for sid, genome in ancestor_genomes.items():
-            if genome["max_height"] < 0.5:
-                assert genome["growth_form"] in (2, 3, 4), (
-                    f"Species {sid} has max_height={genome['max_height']} "
-                    f"but growth_form={genome['growth_form']} (expected 2/3/4 for short plants)"
-                )
-
-
-# ---------------------------------------------------------------------------
-# 4. Ancestor trait values
+# 3. Ancestor trait values
 # ---------------------------------------------------------------------------
 
 
 class TestAncestorTraitValues:
-    def test_six_ancestors_created(self, ancestor_genomes):
-        """Exactly 6 ancestor species should be created."""
-        assert len(ancestor_genomes) == 6, (
-            f"Expected 6 ancestors, got {len(ancestor_genomes)}"
-        )
-
-    def test_new_functional_traits_present(self, ancestor_genomes):
-        """The three new functional traits must be present in every ancestor."""
-        new_traits = {"phenological_aggressiveness", "evergreenness", "mast_interval"}
-        for sid, genome in ancestor_genomes.items():
-            missing = new_traits - genome.keys()
-            assert not missing, (
-                f"Ancestor {sid} missing new functional traits: {missing}"
-            )
-
-    def test_pioneer_forb_phenological_aggressiveness(self, ancestor_genomes):
-        """pioneer_forb should have phenological_aggressiveness > 0.6."""
-        forb = [g for sid, g in ancestor_genomes.items() if "pioneer_forb" in sid]
-        assert len(forb) == 1, f"Expected 1 pioneer_forb, found {len(forb)}"
-        val = forb[0]["phenological_aggressiveness"]
-        assert val > 0.6, (
-            f"pioneer_forb phenological_aggressiveness={val}, expected > 0.6"
-        )
-
-    def test_alpine_cushion_evergreenness(self, ancestor_genomes):
-        """alpine_cushion should have evergreenness > 0.6."""
-        cushion = [g for sid, g in ancestor_genomes.items() if "alpine_cushion" in sid]
-        assert len(cushion) == 1, f"Expected 1 alpine_cushion, found {len(cushion)}"
-        val = cushion[0]["evergreenness"]
-        assert val > 0.6, (
-            f"alpine_cushion evergreenness={val}, expected > 0.6"
-        )
-
-    def test_valley_tree_mast_interval(self, ancestor_genomes):
-        """valley_tree should have mast_interval >= 3."""
-        tree = [g for sid, g in ancestor_genomes.items() if "valley_tree" in sid]
-        assert len(tree) == 1, f"Expected 1 valley_tree, found {len(tree)}"
-        val = tree[0]["mast_interval"]
-        assert val >= 3, (
-            f"valley_tree mast_interval={val}, expected >= 3"
+    def test_ancestors_created(self, ancestor_genomes):
+        """All ancestor species should be created."""
+        from bike_sim.tiers.ecology import _ANCESTOR_TEMPLATES
+        expected = len(_ANCESTOR_TEMPLATES)
+        assert len(ancestor_genomes) == expected, (
+            f"Expected {expected} ancestors, got {len(ancestor_genomes)}"
         )
 
     def test_ancestor_traits_close_to_templates(self, ancestor_genomes):
-        """Original 7 traits should be within perturbation range of templates.
+        """Traits should be within perturbation range of templates.
 
         The perturbation range is [-0.05, 0.05] for each trait, so actual
         values should be within 0.05 of the template value.
         """
-        # Build a lookup from ancestor name fragment to template.
         from bike_sim.tiers.ecology import _ANCESTOR_TEMPLATES
 
         for template_name, template_genome in _ANCESTOR_TEMPLATES:
@@ -347,24 +192,46 @@ class TestAncestorTraitValues:
             sid, genome = matches[0]
             for trait, expected in template_genome.items():
                 actual = genome[trait]
-                assert abs(actual - expected) <= 0.05 + 1e-9, (
-                    f"Ancestor {sid}: {trait}={actual}, expected within 0.05 of {expected}"
-                )
+                if trait == "dispersal_range":
+                    # Integer trait: allow +-1 from rounding
+                    assert abs(actual - expected) <= 1, (
+                        f"Ancestor {sid}: {trait}={actual}, expected within 1 of {expected}"
+                    )
+                else:
+                    assert abs(actual - expected) <= 0.05 + 1e-9, (
+                        f"Ancestor {sid}: {trait}={actual}, expected within 0.05 of {expected}"
+                    )
+
+    def test_valley_hardwood_is_tall(self, ancestor_genomes):
+        """valley_hardwood should be a tall tree (max_height > 25)."""
+        tree = [g for sid, g in ancestor_genomes.items() if "valley_hardwood" in sid]
+        assert len(tree) == 1
+        assert tree[0]["max_height"] > 25, (
+            f"valley_hardwood max_height={tree[0]['max_height']}, expected > 25"
+        )
+
+    def test_alpine_cushion_is_frost_tolerant(self, ancestor_genomes):
+        """alpine_cushion should have frost_tolerance > 0.7."""
+        cushion = [g for sid, g in ancestor_genomes.items() if "alpine_cushion" in sid]
+        assert len(cushion) == 1
+        assert cushion[0]["frost_tolerance"] > 0.7, (
+            f"alpine_cushion frost_tolerance={cushion[0]['frost_tolerance']}, expected > 0.7"
+        )
 
 
 # ---------------------------------------------------------------------------
-# 5. Speciation drift
+# 4. Speciation drift
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.slow
 class TestSpeciationDrift:
-    def test_speciated_species_have_17_traits(self, multi_tick_world):
-        """Any species produced by speciation must have all 17 traits."""
+    def test_speciated_species_have_6_traits(self, multi_tick_world):
+        """Any species produced by speciation must have all 6 traits."""
         species = multi_tick_world.events.list_species()
         children = [sp for sp in species if sp["parent_id"] is not None]
         if len(children) == 0:
-            pytest.skip("No speciation occurred — stochastic, cannot test drift")
+            pytest.skip("No speciation occurred -- stochastic, cannot test drift")
         for sp in children:
             sid = sp["species_id"]
             genome = multi_tick_world.events.get_species(sid)["genome"]
@@ -372,42 +239,25 @@ class TestSpeciationDrift:
             assert not missing, (
                 f"Speciated species {sid} missing traits: {missing}"
             )
-            assert len(genome) == 17, (
-                f"Speciated species {sid} has {len(genome)} traits, expected 17"
+            assert len(genome) == 6, (
+                f"Speciated species {sid} has {len(genome)} traits, expected 6"
             )
 
-    def test_growth_form_stays_int_after_speciation(self, multi_tick_world):
-        """growth_form must remain an integer in [0, 4] after speciation."""
+    def test_dispersal_range_stays_int_after_speciation(self, multi_tick_world):
+        """dispersal_range must remain an integer in [1, 6] after speciation."""
         species = multi_tick_world.events.list_species()
         children = [sp for sp in species if sp["parent_id"] is not None]
         if not children:
-            pytest.skip("No speciation occurred — stochastic")
+            pytest.skip("No speciation occurred -- stochastic")
         for sp in children:
             sid = sp["species_id"]
             genome = multi_tick_world.events.get_species(sid)["genome"]
-            val = genome["growth_form"]
+            val = genome["dispersal_range"]
             assert isinstance(val, int), (
-                f"Speciated {sid}: growth_form={val} is {type(val).__name__}, expected int"
+                f"Speciated {sid}: dispersal_range={val} is {type(val).__name__}, expected int"
             )
-            assert 0 <= val <= 4, (
-                f"Speciated {sid}: growth_form={val} outside [0, 4]"
-            )
-
-    def test_mast_interval_stays_int_after_speciation(self, multi_tick_world):
-        """mast_interval must remain an integer in [1, 7] after speciation."""
-        species = multi_tick_world.events.list_species()
-        children = [sp for sp in species if sp["parent_id"] is not None]
-        if not children:
-            pytest.skip("No speciation occurred — stochastic")
-        for sp in children:
-            sid = sp["species_id"]
-            genome = multi_tick_world.events.get_species(sid)["genome"]
-            val = genome["mast_interval"]
-            assert isinstance(val, int), (
-                f"Speciated {sid}: mast_interval={val} is {type(val).__name__}, expected int"
-            )
-            assert 1 <= val <= 7, (
-                f"Speciated {sid}: mast_interval={val} outside [1, 7]"
+            assert 1 <= val <= 6, (
+                f"Speciated {sid}: dispersal_range={val} outside [1, 6]"
             )
 
     def test_bounded_traits_stay_in_bounds_after_speciation(self, multi_tick_world):
@@ -415,16 +265,11 @@ class TestSpeciationDrift:
         species = multi_tick_world.events.list_species()
         children = [sp for sp in species if sp["parent_id"] is not None]
         if not children:
-            pytest.skip("No speciation occurred — stochastic")
+            pytest.skip("No speciation occurred -- stochastic")
         for sp in children:
             sid = sp["species_id"]
             genome = multi_tick_world.events.get_species(sid)["genome"]
             for trait in BOUNDED_FUNCTIONAL:
-                val = genome[trait]
-                assert 0.0 <= val <= 1.0, (
-                    f"Speciated {sid}: {trait}={val} outside [0, 1]"
-                )
-            for trait in MORPHOLOGICAL_FLOATS:
                 val = genome[trait]
                 assert 0.0 <= val <= 1.0, (
                     f"Speciated {sid}: {trait}={val} outside [0, 1]"
@@ -434,7 +279,7 @@ class TestSpeciationDrift:
 
 
 # ---------------------------------------------------------------------------
-# 6. Determinism
+# 5. Determinism
 # ---------------------------------------------------------------------------
 
 
@@ -481,7 +326,6 @@ class TestDeterminism:
             }
             worlds_genomes.append(g)
 
-        # Species IDs should be the same (template-derived), but trait values should differ.
         common_ids = worlds_genomes[0].keys() & worlds_genomes[1].keys()
         assert len(common_ids) > 0, "No common species IDs between different seeds"
 
@@ -495,4 +339,4 @@ class TestDeterminism:
             if any_differ:
                 break
 
-        assert any_differ, "All genomes identical across different seeds — RNG not seeded properly"
+        assert any_differ, "All genomes identical across different seeds -- RNG not seeded properly"

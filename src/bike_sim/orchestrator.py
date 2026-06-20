@@ -20,6 +20,7 @@ import numpy as np
 
 from bike_sim.tiers.climate_hydrology import ClimateHydrologyTier, _distance_transform
 from bike_sim.tiers.ecology import EcologyTier
+from bike_sim.tiers.ground_cover import compute_ground_cover
 from bike_sim.tiers.erosion import (
     ErosionParams,
     SeasonalErosionParams,
@@ -121,11 +122,25 @@ class Orchestrator:
         """Internal: run the seasonal loop without version management."""
         eco = EcologyTier(self._world)
         heightmap = self._world.rasters.read_layer("geology", "heightmap")
-        weather_sys = WeatherSystem(self._world.seed, heightmap)
+
+        # Load spatial climate bias fields if available
+        ch_layers = self._world.rasters.list_layers("climate_hydrology")
+        moisture_bias = (
+            self._world.rasters.read_layer("climate_hydrology", "moisture_bias")
+            if "moisture_bias" in ch_layers else None
+        )
+        continentality = (
+            self._world.rasters.read_layer("climate_hydrology", "continentality")
+            if "continentality" in ch_layers else None
+        )
+        weather_sys = WeatherSystem(
+            self._world.seed, heightmap,
+            moisture_bias=moisture_bias,
+            continentality=continentality,
+        )
 
         # Load mutable terrain state
         store = self._world.rasters
-        ch_layers = store.list_layers("climate_hydrology")
 
         if "eroded_heightmap" in ch_layers:
             eroded_hm = store.read_layer("climate_hydrology", "eroded_heightmap").copy()
@@ -156,6 +171,11 @@ class Orchestrator:
 
             # 2. Tick ecology
             eco.tick(weather)
+
+            # 2b. Compute ground cover from current conditions
+            cover_type, cover_vigor = compute_ground_cover(weather)
+            store.write_layer("ecology", "ground_cover_type", cover_type, eco_clock.tick_number)
+            store.write_layer("ecology", "ground_cover_vigor", cover_vigor, eco_clock.tick_number)
 
             # 3. Tick summary logging
             current_tick = eco_clock.tick_number  # already advanced by eco.tick()
@@ -240,20 +260,10 @@ class Orchestrator:
             total_density = float(density.sum())
             occupied_cells = int((density > 0).sum())
 
-            # Mean biomass age over occupied cells
-            age_layer = f"biomass_age_{sid}"
-            if age_layer in ecology_layers:
-                age = store.read_layer("ecology", age_layer)
-                mask = density > 0
-                mean_age = float(age[mask].mean()) if mask.any() else 0.0
-            else:
-                mean_age = 0.0
-
             summaries.append({
                 "species_id": sid,
                 "total_density": total_density,
                 "occupied_cells": occupied_cells,
-                "mean_biomass_age": mean_age,
             })
 
         if summaries:
@@ -263,14 +273,7 @@ class Orchestrator:
         mean_temp = float(weather.temperature.mean())
         mean_precip = float(weather.precipitation.mean())
 
-        # Drought stress from ecology layer
-        if "drought_stress" in ecology_layers:
-            drought = store.read_layer("ecology", "drought_stress")
-            mean_drought = float(drought.mean())
-        else:
-            mean_drought = 0.0
-
-        events.write_tick_weather(tick, year, season, mean_temp, mean_precip, mean_drought)
+        events.write_tick_weather(tick, year, season, mean_temp, mean_precip, 0.0)
 
     def _write_derived_climate(
         self,

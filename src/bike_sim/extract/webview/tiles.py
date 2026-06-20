@@ -88,6 +88,13 @@ _LUT_GREENS = _build_lut([
     (1.0, (10, 80, 20)),
 ])
 
+# Hot: yellow → orange → red (for ride path distance)
+_LUT_HOT = _build_lut([
+    (0.0, (255, 255, 100)),
+    (0.5, (255, 140, 0)),
+    (1.0, (220, 20, 20)),
+])
+
 # Categorical: discrete colors for bedrock type, soil type, etc.
 _LUT_CATEGORICAL = np.array([
     [180, 120, 80],   # 0 - sandstone
@@ -114,6 +121,7 @@ _LAYER_LUTS: dict[str, np.ndarray] = {
     "frost_pocket": _LUT_BLUES,
     "growing_degree_days": _LUT_VIRIDIS,
     "distance_to_water": _LUT_BLUES,
+    "path_distance": _LUT_HOT,
 }
 
 
@@ -123,6 +131,7 @@ _LUT_NAMES: dict[int, str] = {
     id(_LUT_BLUES): "blues",
     id(_LUT_GREENS): "greens",
     id(_LUT_CATEGORICAL): "categorical",
+    id(_LUT_HOT): "hot",
 }
 
 

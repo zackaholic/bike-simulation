@@ -30,6 +30,7 @@ import numpy as np
 
 from bike_sim.rng import create_rng
 from bike_sim.tiers.erosion import ErosionParams, erode_hydraulic, erode_thermal
+from bike_sim.tiers.geology import _bilinear_upsample
 from bike_sim.world import World
 
 TIER = "climate_hydrology"
@@ -109,6 +110,14 @@ class ClimateHydrologyTier:
         store.write_layer(TIER, "eroded_heightmap", eroded, tick_num)
         store.write_layer(TIER, "sediment_depth", sediment, tick_num)
 
+        # 9. Spatial climate bias fields (generated once on tick 0).
+        if tick_num == 0:
+            moisture_bias, continentality = self._generate_spatial_climate_fields(
+                geology_heightmap, tick_num
+            )
+            store.write_layer(TIER, "moisture_bias", moisture_bias, tick_num)
+            store.write_layer(TIER, "continentality", continentality, tick_num)
+
         # Advance clock.
         clock.tick_number += 1
         clock.simulated_year += self.YEARS_PER_TICK
@@ -121,6 +130,70 @@ class ClimateHydrologyTier:
         except Exception:
             pass
         return np.zeros((self.GRID_SIZE, self.GRID_SIZE), dtype=np.float64)
+
+    # ------------------------------------------------------------------
+    # Spatial climate bias fields
+    # ------------------------------------------------------------------
+
+    def _generate_spatial_climate_fields(
+        self, heightmap: np.ndarray, tick_number: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Generate moisture_bias and continentality noise fields.
+
+        These are static 2D fields that create distinct climate regions
+        without hard biome boundaries. They modulate the weather system's
+        output spatially:
+
+        - moisture_bias [0.5, 2.0]: multiplied against precipitation.
+          Correlates with elevation (lower = wetter) to create natural
+          rain shadow effects.
+        - continentality [0.0, 1.0]: scales temperature extremes.
+          High = hot summers/cold winters. Low = mild/maritime.
+
+        Both use low-frequency noise (2-3 octaves) to produce 4-6
+        landscape-scale regions with gradual transitions.
+        """
+        rng = create_rng(self._world.seed, TIER, "spatial_climate", tick_number)
+        size = self.GRID_SIZE
+
+        # --- Moisture bias ---
+        # Low-frequency noise: broad regions with one detail octave
+        moisture_raw = np.zeros((size, size), dtype=np.float64)
+        noise = rng.random((3, 3))
+        moisture_raw += _bilinear_upsample(noise, size) * 1.0
+        noise = rng.random((7, 7))
+        moisture_raw += _bilinear_upsample(noise, size) * 0.3
+
+        # Normalize to [0, 1]
+        lo, hi = moisture_raw.min(), moisture_raw.max()
+        if hi > lo:
+            moisture_raw = (moisture_raw - lo) / (hi - lo)
+        else:
+            moisture_raw[:] = 0.5
+
+        # Correlate with elevation: lower areas are wetter
+        elev_norm = heightmap / (heightmap.max() + 1e-10)
+        # Blend: 70% noise, 30% elevation influence (inverted)
+        moisture_raw = 0.7 * moisture_raw + 0.3 * (1.0 - elev_norm)
+
+        # Map to [0.5, 2.0] range
+        moisture_bias = 0.5 + moisture_raw * 1.5
+
+        # --- Continentality ---
+        # Single low-frequency octave for broad regions, plus one detail octave
+        cont_raw = np.zeros((size, size), dtype=np.float64)
+        noise = rng.random((3, 3))
+        cont_raw += _bilinear_upsample(noise, size) * 1.0
+        noise = rng.random((6, 6))
+        cont_raw += _bilinear_upsample(noise, size) * 0.3
+
+        lo, hi = cont_raw.min(), cont_raw.max()
+        if hi > lo:
+            continentality = (cont_raw - lo) / (hi - lo)
+        else:
+            continentality = np.full((size, size), 0.5, dtype=np.float64)
+
+        return moisture_bias.astype(np.float64), continentality.astype(np.float64)
 
     # ------------------------------------------------------------------
     # Climate envelope

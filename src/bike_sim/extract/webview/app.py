@@ -187,4 +187,24 @@ def create_app(world_dir: str | Path) -> Flask:
             })
         return jsonify(snapshots)
 
+    # ── Ride experience ────────────────────────────────────────────
+
+    @app.route("/api/ride/experience")
+    def api_ride_experience():
+        """Return ride experience data if a ride path exists."""
+        ride_output = world_dir / "ride_output" / "ride_experience.json"
+        if not ride_output.exists():
+            return jsonify({"error": "No ride experience data. Run ride-experience first."}), 404
+        import json
+        return Response(ride_output.read_text(), mimetype="application/json")
+
+    @app.route("/api/ride/path")
+    def api_ride_path():
+        """Return ride path as list of [row, col] pairs."""
+        path_file = world_dir / "ride_output" / "ride_path.json"
+        if not path_file.exists():
+            return jsonify({"error": "No ride path. Run ride-experience first."}), 404
+        import json
+        return Response(path_file.read_text(), mimetype="application/json")
+
     return app

@@ -40,13 +40,11 @@ def _populate_timeline_world(world: World) -> None:
                 "species_id": "anc_00_oak",
                 "total_density": 10.0 + tick,
                 "occupied_cells": 100,
-                "mean_biomass_age": 5.0,
             },
             {
                 "species_id": "anc_01_pine",
                 "total_density": 5.0 + tick * 0.5,
                 "occupied_cells": 50,
-                "mean_biomass_age": 3.0,
             },
         ]
         world.events.write_tick_summary(tick, year, season, species_summaries)

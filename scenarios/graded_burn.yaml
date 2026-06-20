@@ -1,0 +1,13 @@
+name: graded_burn
+description: "Grass fire near center: hits grasses hard, shrubs moderately, trees lightly."
+weather_mode: frozen
+sustained: []
+shocks:
+  - type: graded_burn
+    location: [500, 500]
+    radius: 120
+    bands:                          # first band whose height_below > max_height wins
+      - {height_below: 1.0,  kill: 0.95}   # grasses / forbs
+      - {height_below: 10.0, kill: 0.6}    # shrubs
+      - {height_below: 1000, kill: 0.2}    # trees (catch-all)
+run_years: 300

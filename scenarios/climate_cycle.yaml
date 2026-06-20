@@ -1,0 +1,6 @@
+name: climate_cycle
+description: "Natural climate cycling, no perturbation — watch biomes migrate over the ~300yr cycle."
+weather_mode: cycling
+sustained: []
+shocks: []
+run_years: 1200

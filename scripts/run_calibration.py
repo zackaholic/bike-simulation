@@ -60,7 +60,20 @@ def compute_epoch_diagnostics(world, prev_state, tick_start, tick_end):
 
     # Generate weather at current time for suitability computation
     heightmap = store.read_layer("geology", "heightmap")
-    weather_sys = WeatherSystem(world.seed, heightmap)
+    ch_layers = store.list_layers("climate_hydrology")
+    moisture_bias = (
+        store.read_layer("climate_hydrology", "moisture_bias")
+        if "moisture_bias" in ch_layers else None
+    )
+    continentality = (
+        store.read_layer("climate_hydrology", "continentality")
+        if "continentality" in ch_layers else None
+    )
+    weather_sys = WeatherSystem(
+        world.seed, heightmap,
+        moisture_bias=moisture_bias,
+        continentality=continentality,
+    )
     season = world.tier_clocks["ecology"].tick_number % 4
     weather = weather_sys.generate(current_year, season)
 
