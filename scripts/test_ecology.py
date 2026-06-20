@@ -281,6 +281,56 @@ def plot_strips(
     plt.close(fig)
 
 
+def plot_strip_sequence(snapshots, output_path, title="Biome migration over time"):
+    """Plot the N-S strip at a sequence of times, stacked vertically.
+
+    ``snapshots`` is a list of ``(year, strips_dict)``. Each panel shows the
+    same N-S transect at a different time, with consistent per-species colors,
+    so spatial boundaries shifting across the climate cycle are visible as a
+    sequence (amplitude AND phase, not just before/after).
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import hsv_to_rgb
+
+    if not snapshots:
+        return
+
+    # Consistent colors across all panels.
+    all_sids = set()
+    for _, strips in snapshots:
+        all_sids.update(strips["ns_strip"].keys())
+    sorted_sids = sorted(all_sids)
+    n_sp = len(sorted_sids)
+    colors = {sid: hsv_to_rgb((i / max(n_sp, 1), 0.7, 0.85))
+              for i, sid in enumerate(sorted_sids)}
+
+    positions_km = [p / 1000.0 for p in snapshots[0][1]["positions_m"]]
+
+    n = len(snapshots)
+    fig, axes = plt.subplots(n, 1, figsize=(14, 1.6 * n + 1), sharex=True)
+    if n == 1:
+        axes = [axes]
+
+    for ax, (year, strips) in zip(axes, snapshots):
+        for sid in sorted_sids:
+            vals = strips["ns_strip"].get(sid)
+            if vals is None:
+                continue
+            ax.fill_between(positions_km[:len(vals)], vals, alpha=0.25, color=colors[sid])
+            ax.plot(positions_km[:len(vals)], vals, linewidth=0.6, color=colors[sid], label=sid)
+        ax.set_ylabel(f"yr {year:.0f}", fontsize=8)
+        ax.tick_params(labelsize=7)
+
+    axes[0].set_title(title)
+    axes[0].legend(loc="upper right", fontsize=5, ncol=min(6, n_sp))
+    axes[-1].set_xlabel("N-S position (km)")
+    plt.tight_layout()
+    plt.savefig(str(output_path), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_convergence(history: list[dict], output_path: str | Path) -> None:
     """Plot total density per species over time to show convergence."""
     import matplotlib
@@ -331,6 +381,7 @@ def run_epochs(
     world_dir,
     label_prefix="+",
     trigger_prefix="run",
+    epoch_callback=None,
 ):
     """Run ``n_epochs`` ecology epochs, checking for equilibrium each epoch.
 
@@ -338,6 +389,10 @@ def run_epochs(
     ecology tick number. This is the shared engine for both ``cmd_perturb`` and
     the declarative scenario runner — the only thing that varies between callers
     is how weather is constructed (frozen seasons vs. a live climate cycle).
+
+    ``epoch_callback(world, epoch, current_year)`` (optional) is invoked after
+    each epoch's measurement — used by cycling runs to snapshot strips so the
+    biome migration can be seen as a time sequence.
 
     Returns ``(history, eq_reached, eq_year, total_time)`` where ``eq_year`` is
     the post-start year at which equilibrium was first reached (or None).
@@ -390,6 +445,9 @@ def run_epochs(
               f"max Δ {max_change*100:5.1f}% ({mover_str}) | "
               f"{'STABLE' if is_stable else 'settling'} | "
               f"{elapsed:.0f}s")
+
+        if epoch_callback is not None:
+            epoch_callback(world, epoch, current_year)
 
         if epoch_years >= MIN_PERTURBATION_YEARS and is_stable:
             stable_count += 1
@@ -526,11 +584,22 @@ def build_weather_for_tick(world, scenario):
             apply_sustained_mods(sw, scenario.sustained)
         return lambda tick: static_seasons[tick % 4]
 
-    # cycling: regenerate live each tick (slow climate drift is preserved), then
-    # apply sustained mods to that fresh copy so the modifications ride on top of
-    # the real climate signal.
+    # cycling: regenerate live each tick (slow climate drift preserved), then
+    # apply sustained mods on top of the real climate signal.
+    #
+    # Phase continuity: the baseline equilibrated under FROZEN year-25 weather, so
+    # we start the cycle at cycle-time 25.0 and advance 0.25/tick from there — the
+    # first ticks reproduce exactly the frozen seasons the baseline saw, then the
+    # slow climate drift takes over with no discontinuity. We pass
+    # ``year = cycle_time - season*0.25`` because generate() computes its internal
+    # time as ``year + season*0.25``; this keeps total time = cycle_time and avoids
+    # the seasonal double-count that ``year=tick*0.25`` would introduce.
+    start_tick = world.tier_clocks["ecology"].tick_number
+
     def weather_for_tick(tick):
-        sw = weather_sys.generate(year=tick * 0.25, season=tick % 4)
+        season = tick % 4
+        cycle_time = 25.0 + (tick - start_tick) * 0.25
+        sw = weather_sys.generate(year=cycle_time - season * 0.25, season=season)
         return apply_sustained_mods(sw, scenario.sustained)
 
     return weather_for_tick
@@ -1230,7 +1299,17 @@ def run_scenario(scenario, baseline_dir, results_root, keep=False):
         write_densities(world, densities)
         print(f"  Applied {len(scenario.shocks)} shock(s) at t=0")
 
-    # Run.
+    # Run. For cycling runs, snapshot strips each epoch so the biome migration
+    # over the climate cycle can be seen as a time sequence (amplitude + phase),
+    # which a plain before/after comparison would miss entirely.
+    strip_sequence = []
+    epoch_callback = None
+    if scenario.weather_mode == "cycling":
+        strip_sequence.append((world.tier_clocks["ecology"].simulated_year, sample_strips(world)))
+
+        def epoch_callback(world, epoch, current_year):
+            strip_sequence.append((current_year, sample_strips(world)))
+
     eco = _configure_eco(EcologyTier(world))
     n_epochs = scenario.run_years // EPOCH_YEARS
     print(f"\nRunning {scenario.run_years}yr...")
@@ -1241,6 +1320,7 @@ def run_scenario(scenario, baseline_dir, results_root, keep=False):
         world_dir=scratch_dir,
         label_prefix="+",
         trigger_prefix=f"scenario {scenario.name}",
+        epoch_callback=epoch_callback,
     )
 
     world.save(scratch_dir / "world.json")
@@ -1290,6 +1370,13 @@ def run_scenario(scenario, baseline_dir, results_root, keep=False):
         compare_label=f"After (+{scenario.run_years}yr)",
     )
     plot_convergence(history, out_dir / "convergence.png")
+
+    # Cycling runs: the migration sequence (strips at each epoch over the cycle).
+    if strip_sequence:
+        plot_strip_sequence(
+            strip_sequence, out_dir / "strip_sequence.png",
+            title=f"{scenario.name}: biome migration over time",
+        )
 
     print(f"\n  Results: {out_dir}/")
 
