@@ -1,0 +1,12 @@
+name: blight
+description: "Canopy blight: tall trees can't reproduce for 50 years, then recover. Watch shorter species seize the gap, then the trees claw back."
+weather_mode: frozen
+sustained: []
+shocks: []
+modifiers:
+  - mechanism: growth          # halt reproduction (sterility)
+    multiplier: 0.0
+    start_year: 50
+    end_year: 100
+    target: {trait: max_height, op: ">", value: 10}   # canopy trees only
+run_years: 400

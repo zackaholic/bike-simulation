@@ -382,6 +382,7 @@ def run_epochs(
     label_prefix="+",
     trigger_prefix="run",
     epoch_callback=None,
+    pre_tick=None,
 ):
     """Run ``n_epochs`` ecology epochs, checking for equilibrium each epoch.
 
@@ -393,6 +394,10 @@ def run_epochs(
     ``epoch_callback(world, epoch, current_year)`` (optional) is invoked after
     each epoch's measurement — used by cycling runs to snapshot strips so the
     biome migration can be seen as a time sequence.
+
+    ``pre_tick(tick)`` (optional) is invoked immediately before each ecology tick
+    — used by the scenario runner to push time-bounded mechanism modifiers
+    (blights etc.) onto the ecology tier for that tick.
 
     Returns ``(history, eq_reached, eq_year, total_time)`` where ``eq_year`` is
     the post-start year at which equilibrium was first reached (or None).
@@ -414,6 +419,8 @@ def run_epochs(
 
         for _ in range(EPOCH_TICKS):
             tick = world.tier_clocks["ecology"].tick_number
+            if pre_tick is not None:
+                pre_tick(tick)
             eco.tick(weather_for_tick(tick))
 
         world.commit_version(trigger=f"{trigger_prefix} epoch {epoch}")
@@ -479,6 +486,10 @@ class Scenario:
       EVERY tick's weather (e.g. a permanent +5°C shift).
     - shocks: list of {type, ...params} one-time disturbances applied to the
       density rasters at t=0 (dispatched through the shock registry).
+    - modifiers: list of {mechanism, multiplier, start_year, end_year, ...}
+      time-bounded multipliers on tick mechanisms (growth/mortality/dispersal/
+      carrying_capacity) for targeted species — blights, plagues, sterility,
+      fertility pulses. start_year/end_year are relative to scenario start.
     """
 
     name: str
@@ -486,6 +497,7 @@ class Scenario:
     weather_mode: str = "frozen"
     sustained: list = field(default_factory=list)
     shocks: list = field(default_factory=list)
+    modifiers: list = field(default_factory=list)
     run_years: int = 500
 
     def to_dict(self):
@@ -495,6 +507,7 @@ class Scenario:
             "weather_mode": self.weather_mode,
             "sustained": self.sustained,
             "shocks": self.shocks,
+            "modifiers": self.modifiers,
             "run_years": self.run_years,
         }
 
@@ -514,14 +527,48 @@ def load_scenario(path) -> Scenario:
             f"(expected one of {VALID_WEATHER_MODES})"
         )
 
+    modifiers = raw.get("modifiers", []) or []
+    _validate_modifiers(path, modifiers)
+
     return Scenario(
         name=raw["name"],
         description=raw.get("description", ""),
         weather_mode=mode,
         sustained=raw.get("sustained", []) or [],
         shocks=raw.get("shocks", []) or [],
+        modifiers=modifiers,
         run_years=int(raw.get("run_years", 500)),
     )
+
+
+VALID_MECHANISMS = ("growth", "mortality", "dispersal", "carrying_capacity")
+
+
+def _validate_modifiers(path, modifiers):
+    """Validate the modifier list shape; raise ValueError on a bad spec."""
+    for i, mod in enumerate(modifiers):
+        where = f"Scenario {path}: modifiers[{i}]"
+        mech = mod.get("mechanism")
+        if mech not in VALID_MECHANISMS:
+            raise ValueError(
+                f"{where}: unknown mechanism {mech!r} (expected one of {VALID_MECHANISMS})"
+            )
+        if "multiplier" not in mod:
+            raise ValueError(f"{where}: missing required field 'multiplier'")
+        if "start_year" not in mod or "end_year" not in mod:
+            raise ValueError(f"{where}: requires both 'start_year' and 'end_year'")
+        if mod["end_year"] <= mod["start_year"]:
+            raise ValueError(f"{where}: end_year must be greater than start_year")
+        if "species" in mod and "target" in mod:
+            raise ValueError(f"{where}: give 'species' or 'target', not both")
+        if "target" in mod:
+            filt = mod["target"]
+            if filt.get("op") not in _FILTER_OPS:
+                raise ValueError(
+                    f"{where}: target.op must be one of {sorted(_FILTER_OPS)}"
+                )
+            if "trait" not in filt or "value" not in filt:
+                raise ValueError(f"{where}: target requires 'trait' and 'value'")
 
 
 # ---------------------------------------------------------------------------
@@ -734,6 +781,50 @@ def _shock_pestilence(world, densities, rng, params):
         genome = world.events.get_species(sid)["genome"]
         if trait in genome and cmp(genome[trait], value):
             densities[sid] *= (1.0 - kill)
+
+
+def resolve_modifiers(world, modifiers, rel_year):
+    """Resolve the active mechanism multipliers at a given scenario-relative year.
+
+    Returns ``{species_id: {mechanism: multiplier}}`` for every modifier whose
+    ``[start_year, end_year)`` window contains ``rel_year``. Multiple modifiers
+    acting on the same (species, mechanism) multiply together. Targeting is by
+    explicit ``species``, by a genome ``target`` filter, or — if neither is given
+    — all alive species (a world-wide effect). This lives entirely in the harness:
+    the ecology tier only ever sees the resolved plain multipliers.
+    """
+    active = [m for m in modifiers if m["start_year"] <= rel_year < m["end_year"]]
+    if not active:
+        return {}
+
+    current_year = world.tier_clocks["ecology"].simulated_year
+    species_list = world.events.list_species(alive_at_year=current_year)
+
+    resolved: dict[str, dict[str, float]] = {}
+    for mod in active:
+        mech = mod["mechanism"]
+        mult = mod["multiplier"]
+
+        if "species" in mod:
+            targets = [mod["species"]]
+        elif "target" in mod:
+            filt = mod["target"]
+            cmp = _FILTER_OPS[filt["op"]]
+            trait, value = filt["trait"], filt["value"]
+            targets = [
+                sp["species_id"]
+                for sp in species_list
+                if trait in (g := world.events.get_species(sp["species_id"])["genome"])
+                and cmp(g[trait], value)
+            ]
+        else:
+            targets = [sp["species_id"] for sp in species_list]
+
+        for sid in targets:
+            per_mech = resolved.setdefault(sid, {})
+            per_mech[mech] = per_mech.get(mech, 1.0) * mult
+
+    return resolved
 
 
 def write_densities(world, densities):
@@ -1288,6 +1379,9 @@ def run_scenario(scenario, baseline_dir, results_root, keep=False):
 
     world = World.open(scratch_dir)
 
+    # Scenario-relative time origin: modifier windows are measured from here.
+    start_year = world.tier_clocks["ecology"].simulated_year
+
     # Build weather (frozen seasons or live cycle) with sustained mods baked in.
     weather_for_tick = build_weather_for_tick(world, scenario)
 
@@ -1311,6 +1405,18 @@ def run_scenario(scenario, baseline_dir, results_root, keep=False):
             strip_sequence.append((current_year, sample_strips(world)))
 
     eco = _configure_eco(EcologyTier(world))
+
+    # Time-bounded mechanism modifiers (blights etc.): resolve and push onto the
+    # tier before each tick. No-op when the scenario declares no modifiers.
+    pre_tick = None
+    if scenario.modifiers:
+        def pre_tick(tick):
+            rel_year = world.tier_clocks["ecology"].simulated_year - start_year
+            eco.set_mechanism_modifiers(
+                resolve_modifiers(world, scenario.modifiers, rel_year)
+            )
+        print(f"  {len(scenario.modifiers)} modifier(s) armed")
+
     n_epochs = scenario.run_years // EPOCH_YEARS
     print(f"\nRunning {scenario.run_years}yr...")
     history, eq_reached, eq_year, total_time = run_epochs(
@@ -1321,6 +1427,7 @@ def run_scenario(scenario, baseline_dir, results_root, keep=False):
         label_prefix="+",
         trigger_prefix=f"scenario {scenario.name}",
         epoch_callback=epoch_callback,
+        pre_tick=pre_tick,
     )
 
     world.save(scratch_dir / "world.json")

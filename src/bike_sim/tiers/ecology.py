@@ -404,8 +404,30 @@ class EcologyTier:
         # rebound when conditions return. 0.0 = off. This is what lets wet
         # specialists survive dry centuries (and vice versa) for full cyclic swings.
         self.refugium_floor = 0.0
+        # Per-species mechanism multipliers, identity by default. Maps
+        # species_id -> {mechanism: multiplier} where mechanism is one of
+        # "growth", "mortality", "dispersal", "carrying_capacity". The tier
+        # itself knows nothing about *why* a rate is scaled (blight, plague,
+        # fertility boost) — callers (e.g. the test harness) push plain
+        # multipliers for whatever window/targeting they want. Empty dict means
+        # no effect, so normal runs and tests are unchanged.
+        self.mechanism_modifiers: dict[str, dict[str, float]] = {}
 
     # ── public API ─────────────────────────────────────────────────
+
+    def set_mechanism_modifiers(
+        self, modifiers: dict[str, dict[str, float]]
+    ) -> None:
+        """Replace the active per-species mechanism multipliers.
+
+        ``modifiers`` maps species_id -> {mechanism: multiplier}. Mechanisms not
+        listed default to 1.0 (no effect). Pass ``{}`` to clear all modifiers.
+        """
+        self.mechanism_modifiers = modifiers
+
+    def _modifier(self, sid: str, mechanism: str) -> float:
+        """Return the active multiplier for *mechanism* on species *sid* (default 1.0)."""
+        return self.mechanism_modifiers.get(sid, {}).get(mechanism, 1.0)
 
     def tick(self, weather: SeasonalWeather) -> None:
         """Advance ecology by one seasonal tick."""
@@ -674,13 +696,16 @@ class EcologyTier:
             # the negative feedback that corrects overshoot — this is the corrective
             # force that a clipped "available" term would silently discard.
             # growth_rate is per-year; 0.25 factor for seasonal tick.
-            k_eff = K * suit
+            k_eff = K * suit * self._modifier(sid, "carrying_capacity")
             logistic = (k_eff - effective_load) / K
-            growth = density * genome["growth_rate"] * logistic * 0.25
+            growth = (
+                density * genome["growth_rate"] * logistic * 0.25
+                * self._modifier(sid, "growth")
+            )
 
             # Mortality: fixed base rate from lifespan (per seasonal tick)
             base_turnover = 1.0 / (genome["lifespan"] * float(self.TICKS_PER_YEAR))
-            mortality = density * base_turnover
+            mortality = density * base_turnover * self._modifier(sid, "mortality")
 
             densities[sid] = np.clip(density + growth - mortality, 0.0, None)
 
@@ -732,10 +757,14 @@ class EcologyTier:
             radius = int(genome.get("dispersal_range", 3))
             spread = _disperse(density, radius)
             # Only deposit a fraction (dispersal, not teleportation)
-            deposit_fraction = 0.02  # 2% of density spreads per tick
+            deposit_fraction = 0.02 * self._modifier(sid, "dispersal")  # 2% spreads/tick
             densities[sid] = density * (1.0 - deposit_fraction) + spread * deposit_fraction
 
-            # Long-distance dispersal
+            # Long-distance dispersal. The dispersal modifier scales only the
+            # deposited amount, never the RNG draws, so the stochastic stream is
+            # identical whether or not a modifier is active (modifier == 1.0
+            # reproduces the unmodified run bit-for-bit).
+            disp_mult = self._modifier(sid, "dispersal")
             ldd_prob = 0.1 + 0.4 * (radius / 6.0)  # wider dispersers do more LDD
             if rng.random() < ldd_prob:
                 source_cells = np.argwhere(density > 0.5)
@@ -747,7 +776,7 @@ class EcologyTier:
                         sr, sc = source_cells[src_idx]
                         tr = int(np.clip(sr + rng.integers(-max_jump, max_jump + 1), 0, n - 1))
                         tc = int(np.clip(sc + rng.integers(-max_jump, max_jump + 1), 0, n - 1))
-                        densities[sid][tr, tc] += float(density[sr, sc]) * 0.02
+                        densities[sid][tr, tc] += float(density[sr, sc]) * 0.02 * disp_mult
 
     # ── niche overlap ─────────────────────────────────────────────
 

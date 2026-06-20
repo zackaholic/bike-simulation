@@ -706,3 +706,21 @@ See `docs/ground-cover-and-spatial-climate.md` for the complete design including
 **Why**: With the simulation approaching a rideable state, we need a renderer-agnostic way to evaluate the rider experience — whether species distributions create interesting transitions, whether terrain grade is rideable, whether the world feels inhabited. The perpendicular bar sampling (±50m, every 50m of path distance) avoids POV-turning artifacts that a cone would introduce. Distance-based snapshots (not time-based) ensure consistent spatial resolution regardless of riding speed or turn radius.
 
 **Implementation**: A* pathfinding on grade cost surface connecting well-spread waypoints (farthest-point sampling). Path stored as a raster layer for webview display. Experience graph shows elevation/grade, species density, and ground cover along ride distance.
+---
+
+## R2026-06-20 — Tick audit: perf, render-only cleanup, modifier category
+
+### numba erosion + scipy dispersal
+**Decision**: JIT-compile the hydraulic-erosion particle loop with `@numba.njit`; replace the dispersal kernel-slicing loop with `scipy.ndimage.convolve` (kernel cached per radius). Added `numba` and `scipy` as dependencies.
+
+**Why**: A read-only tick audit found the 70k-particle hydraulic erosion (pure-Python particle loop) was the dominant world-creation cost; numba drops it to ~0.5s with no algorithm change. Dispersal ran a per-species kernel² array-add loop every tick — `convolve` is the same correlation in optimised C (verified max diff ~1e-16, mass conserved). numba changes generated terrain slightly (int64 wraps where Python bigints don't on the zero-gradient hash path) but stays deterministic; worlds are regenerable.
+
+### Deleted render-only climate layers
+**Decision**: Remove `solar_insolation`, `distance_to_water`, `frost_days`, and `growing_degree_days` end-to-end. Keep `soil_moisture_summer/winter`.
+
+**Why**: The audit confirmed all five derived layers have no simulation consumer — they were written into the canonical raster store but read only by the webview tile renderer, a soft violation of the rendering-decoupled commitment. Four were not visually useful and their derivation included the two expensive snapshot ops (gradient insolation, Chamfer distance transform). Soil moisture is kept (likely Godot visual); its derivation should later move into the extractor/query layer rather than the sim.
+
+### Modifier category: neutral mechanism-multiplier hook
+**Decision**: Add a `modifiers` scenario category — time-bounded, species/trait-targeted multipliers on tick mechanisms (growth/mortality/dispersal/carrying_capacity) for blights, plagues, sterility, fertility. Implemented as a single neutral concept on `EcologyTier`: `set_mechanism_modifiers({species_id: {mechanism: multiplier}})`, identity by default. All targeting/windowing logic (trait filters, year windows) lives in the test harness, which resolves the active multipliers per tick and pushes plain numbers to the tier.
+
+**Why**: Shocks are one-time density edits; a blight is an *ongoing* process that must scale vital rates while the sim runs. Putting only generic multipliers in the tier (1.0 by default, exact no-op) keeps the simulation ignorant of "what a blight is" and preserves the decoupling — the harness owns the semantics. Philosophically consistent with "drama from perturbing the environment, not tick knobs": a modifier is a transient externally-imposed disturbance over a window, the time-extended cousin of a shock. Multipliers never touch the RNG stream, so a modifier of 1.0 reproduces an unmodified run bit-for-bit.
