@@ -30,6 +30,10 @@ def create_app(world_dir: str | Path) -> Flask:
     world = World.open(world_dir)
     query = WorldQuery(world)
 
+    # Cache sampled ride profiles by (version, interval) — sampling the full
+    # path is a few seconds, and the result is reused across version steps.
+    _profile_cache: dict[tuple[int, float], dict] = {}
+
     @app.teardown_appcontext
     def _close_world(exc: BaseException | None) -> None:  # noqa: ARG001
         pass  # World stays open for the lifetime of the process.
@@ -151,42 +155,6 @@ def create_app(world_dir: str | Path) -> Flask:
         png_bytes = render_tile(query, version, tier, layer, z, x, y, cache_dir)
         return Response(png_bytes, mimetype="image/png")
 
-    # ── Timeline routes ────────────────────────────────────────────
-
-    @app.route("/api/timeline/species")
-    def api_timeline_species():
-        ancestor = request.args.get("ancestor")
-        return jsonify(query.get_species_timeline(ancestor=ancestor))
-
-    @app.route("/api/timeline/weather")
-    def api_timeline_weather():
-        return jsonify(query.get_weather_timeline())
-
-    @app.route("/api/timeline/diversity")
-    def api_timeline_diversity():
-        return jsonify(query.get_diversity_timeline())
-
-    @app.route("/api/timeline/speciation")
-    def api_timeline_speciation():
-        return jsonify(query.get_speciation_timeline())
-
-    @app.route("/api/timeline/disturbance")
-    def api_timeline_disturbance():
-        return jsonify(query.get_disturbance_timeline())
-
-    @app.route("/api/timeline/snapshots")
-    def api_timeline_snapshots():
-        versions = world.list_versions()
-        snapshots = []
-        for entry in versions:
-            eco_clock = entry.get("tier_clocks", {}).get("ecology", {})
-            year = eco_clock.get("simulated_year", 0.0) if isinstance(eco_clock, dict) else 0.0
-            snapshots.append({
-                "version_id": entry["version_id"],
-                "year": year,
-            })
-        return jsonify(snapshots)
-
     # ── Ride experience ────────────────────────────────────────────
 
     @app.route("/api/ride/experience")
@@ -195,7 +163,6 @@ def create_app(world_dir: str | Path) -> Flask:
         ride_output = world_dir / "ride_output" / "ride_experience.json"
         if not ride_output.exists():
             return jsonify({"error": "No ride experience data. Run ride-experience first."}), 404
-        import json
         return Response(ride_output.read_text(), mimetype="application/json")
 
     @app.route("/api/ride/path")
@@ -204,7 +171,38 @@ def create_app(world_dir: str | Path) -> Flask:
         path_file = world_dir / "ride_output" / "ride_path.json"
         if not path_file.exists():
             return jsonify({"error": "No ride path. Run ride-experience first."}), 404
-        import json
         return Response(path_file.read_text(), mimetype="application/json")
+
+    @app.route("/api/world/<int:version>/ride_profile")
+    def api_ride_profile(version: int):
+        """Sample the canonical ride at *version*: density-along-path per species.
+
+        Unlike /api/ride/experience (which serves a stale on-disk file), this
+        samples live against the requested version so stepping the flipbook
+        shows how the ride changes as the world ages. Includes per-species
+        colors matching the map tiles.
+        """
+        try:
+            world.get_version(version)
+        except KeyError:
+            return jsonify({"error": f"Version {version} not found"}), 404
+
+        path_file = world_dir / "ride_output" / "ride_path.json"
+        if not path_file.exists():
+            return jsonify({"error": "No ride path. Run ride-experience first."}), 404
+
+        interval = float(request.args.get("interval", 200.0))
+        key = (version, interval)
+        if key not in _profile_cache:
+            from bike_sim.extract.ride_experience import load_path, sample_ride_experience
+            from bike_sim.extract.webview.tiles import species_color
+
+            path = load_path(path_file)
+            exp = sample_ride_experience(
+                world, path, sample_interval=interval, version=version
+            )
+            exp["colors"] = {sid: list(species_color(sid)) for sid in exp["species"]}
+            _profile_cache[key] = exp
+        return jsonify(_profile_cache[key])
 
     return app

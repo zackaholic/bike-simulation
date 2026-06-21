@@ -1,7 +1,9 @@
-"""Tests for timeline WorldQuery methods and Flask API endpoints.
+"""Tests for the timeline WorldQuery methods.
 
-Verifies that the four timeline query methods handle sample data correctly
-and return empty results gracefully when no data exists.
+Verifies that the timeline query methods handle sample data correctly
+and return empty results gracefully when no data exists. (These remain a
+Layer-B query surface for global stats; the webview no longer exposes them
+as routes.)
 """
 
 from __future__ import annotations
@@ -267,61 +269,3 @@ class TestDisturbanceTimeline:
     def test_empty_world(self, empty_query):
         result = empty_query.get_disturbance_timeline()
         assert result == {"fires": [], "blowdowns": []}
-
-
-# ── Flask endpoint tests ─────────────────────────────────────────
-
-
-@pytest.fixture()
-def client(timeline_world_dir):
-    """Create a Flask test client backed by the timeline test world."""
-    from bike_sim.extract.webview.app import create_app
-
-    app = create_app(timeline_world_dir)
-    app.config["TESTING"] = True
-    with app.test_client() as c:
-        yield c
-
-
-class TestFlaskTimelineEndpoints:
-    def test_species_endpoint(self, client):
-        resp = client.get("/api/timeline/species")
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert "years" in data
-        assert "species" in data
-
-    def test_species_endpoint_with_ancestor(self, client):
-        resp = client.get("/api/timeline/species?ancestor=anc_00_oak")
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert "anc_01_pine" not in data.get("species", {})
-
-    def test_weather_endpoint(self, client):
-        resp = client.get("/api/timeline/weather")
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert "temperature" in data
-        assert "precipitation" in data
-
-    def test_diversity_endpoint(self, client):
-        resp = client.get("/api/timeline/diversity")
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert "shannon" in data
-
-    def test_disturbance_endpoint(self, client):
-        resp = client.get("/api/timeline/disturbance")
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert "fires" in data
-        assert "blowdowns" in data
-
-    def test_snapshots_endpoint(self, client):
-        resp = client.get("/api/timeline/snapshots")
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert isinstance(data, list)
-        assert len(data) >= 1
-        assert "version_id" in data[0]
-        assert "year" in data[0]

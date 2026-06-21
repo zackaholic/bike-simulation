@@ -18,6 +18,24 @@ from bike_sim.orchestrator import Orchestrator
 from bike_sim.world import World
 
 
+def _add_cadence_args(parser: argparse.ArgumentParser) -> None:
+    """Add snapshot/summary cadence flags (shared by create and advance).
+
+    Intervals are in ecology ticks; 4 ticks = 1 year. The defaults match the
+    orchestrator (100-yr snapshots, yearly summaries). Lower --snapshot-interval
+    to mint purpose-built runs, e.g. ``--snapshot-interval 32`` = a snapshot
+    every 8 years (20 snapshots over a 160-yr advance).
+    """
+    parser.add_argument(
+        "--snapshot-interval", type=int, default=400,
+        help="Commit a snapshot every N ecology ticks (4 ticks = 1 year; default 400 = 100 yr).",
+    )
+    parser.add_argument(
+        "--summary-interval", type=int, default=4,
+        help="Write a tick summary every N ecology ticks (default 4 = yearly).",
+    )
+
+
 def _cmd_create(args: argparse.Namespace) -> None:
     """Create a new world and run initial geology + climate passes."""
     world_dir = Path(args.world_dir)
@@ -25,7 +43,11 @@ def _cmd_create(args: argparse.Namespace) -> None:
 
     print(f"Creating world at {world_dir} (seed={seed})...")
     world = World.create(world_dir, seed=seed)
-    orch = Orchestrator(world)
+    orch = Orchestrator(
+        world,
+        summary_interval=args.summary_interval,
+        snapshot_interval=args.snapshot_interval,
+    )
     orch.create_world()
 
     world.save(world_dir / "world.json")
@@ -46,7 +68,11 @@ def _cmd_advance(args: argparse.Namespace) -> None:
 
     print(f"Opening world at {world_dir}...")
     world = World.open(world_dir)
-    orch = Orchestrator(world)
+    orch = Orchestrator(
+        world,
+        summary_interval=args.summary_interval,
+        snapshot_interval=args.snapshot_interval,
+    )
 
     print(f"Advancing {years} years...")
     result = orch.advance(years)
@@ -183,11 +209,13 @@ def main(argv: list[str] | None = None) -> None:
     p_create = subparsers.add_parser("create", help="Create a new world.")
     p_create.add_argument("world_dir", help="Path for the new world directory.")
     p_create.add_argument("--seed", type=int, default=42, help="World seed (default: 42).")
+    _add_cadence_args(p_create)
 
     # -- advance --
     p_advance = subparsers.add_parser("advance", help="Advance a world by N years.")
     p_advance.add_argument("world_dir", help="Path to an existing world directory.")
     p_advance.add_argument("years", type=float, help="Number of years to advance.")
+    _add_cadence_args(p_advance)
 
     # -- ride --
     p_ride = subparsers.add_parser("ride", help="Advance a world by ride duration.")

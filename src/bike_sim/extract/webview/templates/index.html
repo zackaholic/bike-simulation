@@ -10,8 +10,10 @@
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.1.0/dist/chartjs-plugin-annotation.min.js"></script>
 <style>
   html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
-  #map { position: absolute; top: 0; left: 0; right: 0; bottom: 0; }
-  #map.sidebar-open { right: 420px; }
+  /* Map sits to the left; the right edge is reserved for the layer panel,
+     and widens further when the inspector card opens beside it. */
+  #map { position: absolute; top: 0; left: 0; right: 260px; bottom: 0; }
+  #map.sidebar-open { right: 510px; }
   #toolbar {
     position: absolute; top: 10px; left: 60px; z-index: 1000;
     background: white; padding: 6px 12px; border-radius: 4px;
@@ -72,9 +74,13 @@
   }
   .lp-persistent label { cursor: pointer; color: #333; }
   .lp-persistent input[type="checkbox"] { margin-right: 6px; }
+  /* Inspector: a compact card beside the layer panel (not a full-height bar),
+     so it never covers the ride-profile panel at the bottom. */
   #sidebar {
-    position: absolute; top: 0; right: 0; width: 420px; height: 100%;
-    background: #fafafa; border-left: 1px solid #ccc;
+    position: absolute; top: 10px; right: 260px; width: 240px;
+    max-height: calc(100vh - 280px);
+    background: #fff; border: 1px solid #ccc; border-radius: 6px;
+    box-shadow: 0 1px 5px rgba(0,0,0,0.3);
     overflow-y: auto; font: 13px/1.5 sans-serif; padding: 12px;
     box-sizing: border-box; display: none; z-index: 1001;
   }
@@ -142,12 +148,29 @@
   .tl-tabs button:last-child { border-radius: 0 4px 4px 0; }
   .tl-tabs button:hover { background: #e0e0e0; }
   .tl-tabs button.active { background: white; color: #333; border-bottom-color: #4363d8; }
+  .tl-title { font: 600 12px/1.5 sans-serif; color: #333; }
   .tl-close { cursor: pointer; font-size: 16px; color: #888; border: none; background: none; }
   .tl-close:hover { color: #333; }
   .tl-body { flex: 1; min-height: 0; position: relative; padding: 4px 12px 8px; }
   .tl-chart-container { position: absolute; top: 4px; left: 12px; right: 12px; bottom: 8px; display: none; }
   .tl-chart-container.active { display: block; }
+  /* Ride profile leaves room on the right for the live readout legend. */
+  #tl-ride { right: 168px; }
   .tl-empty { color: #999; font: italic 13px/2 sans-serif; text-align: center; padding-top: 40px; }
+  /* Live readout legend (replaces the in-canvas legend; never overlaps the plot). */
+  #ride-legend {
+    position: absolute; top: 6px; right: 10px; bottom: 8px; width: 150px;
+    overflow-y: auto; font: 11px/1.4 sans-serif; color: #333;
+  }
+  #ride-legend .rl-km { font-weight: 700; color: #e6194b; margin-bottom: 4px; }
+  #ride-legend .rl-row {
+    display: flex; align-items: center; gap: 5px; cursor: pointer; padding: 1px 0;
+  }
+  #ride-legend .rl-row:hover { background: #f0f0f0; }
+  #ride-legend .rl-row.rl-off { opacity: 0.4; }
+  #ride-legend .rl-sw { flex: 0 0 10px; height: 10px; border-radius: 2px; }
+  #ride-legend .rl-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #ride-legend .rl-val { flex: 0 0 auto; font-variant-numeric: tabular-nums; color: #555; }
 </style>
 </head>
 <body>
@@ -173,22 +196,16 @@
   <span class="close-btn" id="sidebar-close">&times;</span>
   <div id="sidebar-content"></div>
 </div>
-<button id="timeline-toggle">&#9650; Timeline</button>
+<button id="timeline-toggle">&#9650; Ride profile</button>
 <div id="timeline-panel">
   <div class="tl-header">
-    <div class="tl-tabs" id="tl-tabs">
-      <button class="active" data-tab="population">Population</button>
-      <button data-tab="weather">Weather</button>
-      <button data-tab="diversity">Diversity</button>
-      <button data-tab="speciation">Speciation</button>
-    </div>
-    <button class="tl-close" id="tl-close" title="Close timeline">&times;</button>
+    <div class="tl-title" id="tl-title">Ride profile — species density along the route</div>
+    <button class="tl-close" id="tl-close" title="Close ride profile">&times;</button>
   </div>
   <div class="tl-body" id="tl-body">
-    <div class="tl-chart-container active" id="tl-population"><canvas id="chart-population"></canvas></div>
-    <div class="tl-chart-container" id="tl-weather"><canvas id="chart-weather"></canvas></div>
-    <div class="tl-chart-container" id="tl-diversity"><canvas id="chart-diversity"></canvas></div>
-    <div class="tl-chart-container" id="tl-speciation"><canvas id="chart-speciation"></canvas></div>
+    <div class="tl-chart-container active" id="tl-ride"><canvas id="chart-ride"></canvas></div>
+    <div id="ride-legend"></div>
+    <div class="tl-empty" id="tl-ride-empty" style="display:none">No ride path. Run ride-experience first.</div>
   </div>
 </div>
 <script>
@@ -303,39 +320,21 @@
   }
 
   function renderPointData(data) {
-    var html = "";
-    html += "<h3>Location</h3>";
-    html += "<table><tr><td>x</td><td>" + data.x.toFixed(1) + " m</td></tr>";
-    html += "<tr><td>y</td><td>" + data.y.toFixed(1) + " m</td></tr></table>";
-
     var rasters = data.rasters || {};
-    var byTier = {};
-    for (var key in rasters) {
-      var parts = key.split("/");
-      var tier = parts[0], layer = parts.slice(1).join("/");
-      if (!byTier[tier]) byTier[tier] = [];
-      byTier[tier].push({ layer: layer, value: rasters[key] });
+    var html = "<table>";
+    function row(label, key, unit) {
+      var v = rasters[key];
+      if (v === undefined) return;
+      html += "<tr><td>" + label + "</td><td>" + v.toFixed(1) +
+        (unit ? " " + unit : "") + "</td></tr>";
     }
-    for (var t in byTier) {
-      html += "<h3>" + t.replace(/_/g, " ") + "</h3><table>";
-      byTier[t].forEach(function (r) {
-        html += "<tr><td>" + r.layer + "</td><td>" + formatValue(r.value) + "</td></tr>";
-      });
-      html += "</table>";
-    }
+    row("Altitude", "geology/heightmap", "m");
+    row("Temperature", "climate_hydrology/temperature", "\u00b0C");
+    row("Precipitation", "climate_hydrology/precipitation", "mm/yr");
+    html += "</table>";
 
-    html += "<h3>Species</h3>";
-    var species = data.species || [];
-    if (species.length === 0) {
-      html += '<p class="empty">No species with density &gt; 0</p>';
-    } else {
-      html += "<table>";
-      species.forEach(function (s) {
-        html += "<tr><td>" + s.species_id + "</td><td>" + formatValue(s.density) + "</td></tr>";
-      });
-      html += "</table>";
-    }
-
+    // Species live in the ride-profile readout, so the inspector only adds
+    // distinguished individuals here.
     html += "<h3>Individuals</h3>";
     var individuals = data.individuals || [];
     if (individuals.length === 0) {
@@ -344,18 +343,6 @@
       html += "<table>";
       individuals.forEach(function (ind) {
         html += "<tr><td>" + ind.individual_id + "</td><td>" + ind.species_id + "</td></tr>";
-      });
-      html += "</table>";
-    }
-
-    html += "<h3>Events</h3>";
-    var events = data.events || [];
-    if (events.length === 0) {
-      html += '<p class="empty">None nearby</p>';
-    } else {
-      html += "<table>";
-      events.forEach(function (ev) {
-        html += "<tr><td>" + ev.event_type + "</td><td>yr " + formatValue(ev.year) + "</td></tr>";
       });
       html += "</table>";
     }
@@ -458,15 +445,145 @@
   map.on("moveend", loadIndividuals);
   loadIndividuals();
 
+  // ── Ride path overlay ──────────────────────────────────────
+  // The canonical ride is a polyline plus a ±50 m strip ribbon (the
+  // sampling width, ≈ the rider's immediate visual range). The path is
+  // stable across versions, so it's loaded once.
+
+  var STRIP_HALF_M = 50.0;  // matches SAMPLE_BAR_HALF_M in ride_experience.py
+  var rideLayer = L.layerGroup();
+  var ridePathMeters = null;   // [{x, y}] world coords
+  var rideCumDist = null;      // cumulative distance (m) at each path vertex
+  var rideTotalDist = 0;       // total path length (m)
+  var ridePathLoaded = false;
+
+  function cellToMeters(rc) {
+    // rc = [row, col]; cell centers at col*50+25, row*50+25
+    return { x: rc[1] * 50 + 25, y: rc[0] * 50 + 25 };
+  }
+
+  function buildRibbon(pts) {
+    // Offset each point ±STRIP_HALF_M perpendicular to local heading,
+    // returning a closed polygon ring (left side forward, right side back).
+    var left = [], right = [];
+    for (var i = 0; i < pts.length; i++) {
+      var a = pts[Math.max(0, i - 1)];
+      var b = pts[Math.min(pts.length - 1, i + 1)];
+      var dx = b.x - a.x, dy = b.y - a.y;
+      var len = Math.sqrt(dx * dx + dy * dy) || 1;
+      var px = -dy / len, py = dx / len;  // unit perpendicular
+      left.push(metersToMap(pts[i].x + px * STRIP_HALF_M, pts[i].y + py * STRIP_HALF_M));
+      right.push(metersToMap(pts[i].x - px * STRIP_HALF_M, pts[i].y - py * STRIP_HALF_M));
+    }
+    return left.concat(right.reverse());
+  }
+
+  function loadRidePath() {
+    if (ridePathLoaded) return;
+    fetch("/api/ride/path")
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (path) {
+        if (!path || path.length === 0) return;
+        ridePathMeters = path.map(cellToMeters);
+        // Cumulative distance along the path (meters) for distance↔position mapping.
+        rideCumDist = new Array(ridePathMeters.length);
+        rideCumDist[0] = 0;
+        for (var k = 1; k < ridePathMeters.length; k++) {
+          var ddx = ridePathMeters[k].x - ridePathMeters[k - 1].x;
+          var ddy = ridePathMeters[k].y - ridePathMeters[k - 1].y;
+          rideCumDist[k] = rideCumDist[k - 1] + Math.sqrt(ddx * ddx + ddy * ddy);
+        }
+        rideTotalDist = rideCumDist[rideCumDist.length - 1];
+        var centerline = ridePathMeters.map(function (p) { return metersToMap(p.x, p.y); });
+        L.polygon(buildRibbon(ridePathMeters), {
+          color: "#ffffff", weight: 0, fillColor: "#ffcc33", fillOpacity: 0.18,
+          interactive: false
+        }).addTo(rideLayer);
+        L.polyline(centerline, {
+          color: "#222", weight: 2, opacity: 0.85, interactive: false
+        }).addTo(rideLayer);
+        ridePathLoaded = true;
+      });
+  }
+
+  rideLayer.addTo(map);
+  loadRidePath();
+
+  // ── Ride cursor (links the profile graph to the map path) ──────
+
+  var cursorLayer = L.layerGroup().addTo(map);
+  var rideCursorMarker = null;
+
+  function positionAtDistance(distM) {
+    if (!rideCumDist || rideCumDist.length === 0) return null;
+    distM = Math.max(0, Math.min(rideTotalDist, distM));
+    // Linear scan (path has ~thousands of points; fine for hover use).
+    var i = 1;
+    while (i < rideCumDist.length && rideCumDist[i] < distM) i++;
+    if (i >= rideCumDist.length) i = rideCumDist.length - 1;
+    var d0 = rideCumDist[i - 1], d1 = rideCumDist[i];
+    var t = d1 > d0 ? (distM - d0) / (d1 - d0) : 0;
+    var a = ridePathMeters[i - 1], b = ridePathMeters[i];
+    return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+  }
+
+  function nearestPathDistance(meters) {
+    // Nearest path vertex to a world point; returns {distM, gapM} or null.
+    if (!ridePathMeters) return null;
+    var best = -1, bestD2 = Infinity;
+    for (var i = 0; i < ridePathMeters.length; i++) {
+      var dx = ridePathMeters[i].x - meters.x;
+      var dy = ridePathMeters[i].y - meters.y;
+      var d2 = dx * dx + dy * dy;
+      if (d2 < bestD2) { bestD2 = d2; best = i; }
+    }
+    if (best < 0) return null;
+    return { distM: rideCumDist[best], gapM: Math.sqrt(bestD2) };
+  }
+
+  function setRideCursor(distM) {
+    var pos = positionAtDistance(distM);
+    if (!pos) return;
+    var latlng = metersToMap(pos.x, pos.y);
+    if (rideCursorMarker) {
+      rideCursorMarker.setLatLng(latlng);
+    } else {
+      rideCursorMarker = L.circleMarker(latlng, {
+        radius: 7, color: "#fff", weight: 2, fillColor: "#e6194b",
+        fillOpacity: 1, interactive: false
+      }).addTo(cursorLayer);
+    }
+    setChartCursorLine(distM / 1000.0);
+  }
+
+  function clearRideCursor() {
+    if (rideCursorMarker) { cursorLayer.removeLayer(rideCursorMarker); rideCursorMarker = null; }
+    setChartCursorLine(null);
+  }
+
+  // Click near the ride path → place the cursor there (opens the profile).
+  map.on("click", function (e) {
+    if (!ridePathMeters) return;
+    var near = nearestPathDistance(mapToMeters(e.latlng));
+    if (near && near.gapM <= 500) {
+      if (!tlOpen) toggleTimeline(true);
+      setRideCursor(near.distM);
+    }
+  });
+
   // ── Layer controls ─────────────────────────────────────────
 
   var activeTileLayers = {};  // key → L.tileLayer
 
   function makeTileLayer(tier, layer, isOverlay) {
+    // Species tiles carry per-pixel alpha (density), so they don't need
+    // extra layer-level dimming — keep them near-opaque for legibility.
+    var isSpecies = /^species_.*_density$/.test(layer);
+    var op = isSpecies ? 0.95 : (isOverlay ? 0.6 : 1.0);
     return L.tileLayer(
       "/api/world/" + version + "/tiles/" + tier + "/" + layer + "/{z}/{x}/{y}.png",
       { tileSize: 256, bounds: bounds, minZoom: 0, maxZoom: maxZoom, noWrap: true,
-        opacity: isOverlay ? 0.6 : 1.0, pane: isOverlay ? "overlayPane" : "basePane" }
+        opacity: op, pane: isOverlay ? "overlayPane" : "basePane" }
     );
   }
 
@@ -489,7 +606,13 @@
       .then(function (r) { return r.json(); })
       .then(function (info) {
         if (info.colormap === "categorical") return;  // skip categorical
-        var grad = colormapGradients[info.colormap] || colormapGradients.viridis;
+        var grad;
+        if (info.colormap === "species" && info.color) {
+          var c = info.color;
+          grad = "linear-gradient(to right, rgba(" + c[0] + "," + c[1] + "," + c[2] + ",0), rgb(" + c[0] + "," + c[1] + "," + c[2] + "))";
+        } else {
+          grad = colormapGradients[info.colormap] || colormapGradients.viridis;
+        }
         var div = document.createElement("div");
         div.className = "legend-entry";
         div.innerHTML =
@@ -697,6 +820,23 @@
         indLabel.appendChild(indCb);
         indLabel.appendChild(document.createTextNode("Individuals"));
         lpPersistent.appendChild(indLabel);
+
+        // Ride path toggle.
+        var rideLabel = document.createElement("label");
+        var rideCb = document.createElement("input");
+        rideCb.type = "checkbox";
+        rideCb.checked = map.hasLayer(rideLayer);
+        rideCb.addEventListener("change", function () {
+          if (this.checked) {
+            loadRidePath();
+            rideLayer.addTo(map);
+          } else {
+            map.removeLayer(rideLayer);
+          }
+        });
+        rideLabel.appendChild(rideCb);
+        rideLabel.appendChild(document.createTextNode("Ride path"));
+        lpPersistent.appendChild(rideLabel);
       });
   }
 
@@ -793,28 +933,20 @@
     else if (e.key === "ArrowRight") { e.preventDefault(); stepVersion(1); }
   });
 
-  // ── Timeline panel ────────────────────────────────────────────
+  // ── Ride profile panel ────────────────────────────────────────
+  // Species density along the ride path at the current version. Stepping
+  // the version flipbook re-samples, so you watch the ride change as the
+  // world ages.
 
   var tlPanel = document.getElementById("timeline-panel");
   var tlToggle = document.getElementById("timeline-toggle");
   var tlClose = document.getElementById("tl-close");
-  var tlTabBtns = document.querySelectorAll("#tl-tabs button");
-  var tlContainers = document.querySelectorAll(".tl-chart-container");
+  var rideEmpty = document.getElementById("tl-ride-empty");
   var tlOpen = false;
 
-  // Chart instances
-  var chartPopulation = null;
-  var chartWeather = null;
-  var chartDiversity = null;
-  var chartSpeciation = null;
-  var tlDataLoaded = false;
-
-  // Cached timeline data
-  var tlSpeciesData = null;
-  var tlWeatherData = null;
-  var tlDiversityData = null;
-  var tlSpeciationData = null;
-  var tlSnapshots = [];
+  var chartRide = null;
+  var rideProfileData = null;     // last loaded profile (used by Phase 4 linking)
+  var rideProfileVersion = null;
 
   function toggleTimeline(show) {
     tlOpen = (show !== undefined) ? show : !tlOpen;
@@ -823,14 +955,14 @@
       tlToggle.classList.add("panel-open");
       mapEl.style.bottom = "250px";
       legendEl.style.bottom = "270px";
-      tlToggle.innerHTML = "&#9660; Timeline";
-      if (!tlDataLoaded) loadTimelineData();
+      tlToggle.innerHTML = "&#9660; Ride profile";
+      if (rideProfileVersion !== version || !rideProfileData) loadRideProfile();
     } else {
       tlPanel.classList.remove("open");
       tlToggle.classList.remove("panel-open");
       mapEl.style.bottom = "0";
       legendEl.style.bottom = "20px";
-      tlToggle.innerHTML = "&#9650; Timeline";
+      tlToggle.innerHTML = "&#9650; Ride profile";
     }
     map.invalidateSize();
   }
@@ -838,594 +970,209 @@
   tlToggle.addEventListener("click", function () { toggleTimeline(); });
   tlClose.addEventListener("click", function () { toggleTimeline(false); });
 
-  // Tab switching
-  tlTabBtns.forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      tlTabBtns.forEach(function (b) { b.classList.remove("active"); });
-      btn.classList.add("active");
-      tlContainers.forEach(function (c) { c.classList.remove("active"); });
-      document.getElementById("tl-" + btn.dataset.tab).classList.add("active");
-      // Resize the active chart so it fills its container
-      var activeChart = { population: chartPopulation, weather: chartWeather, diversity: chartDiversity, speciation: chartSpeciation }[btn.dataset.tab];
-      if (activeChart) activeChart.resize();
-    });
-  });
+  function rgbStr(c) { return "rgb(" + c[0] + "," + c[1] + "," + c[2] + ")"; }
+  function rgbaStr(c, a) { return "rgba(" + c[0] + "," + c[1] + "," + c[2] + "," + a + ")"; }
 
-  // Ancestor color palette: 6 ancestors get distinct base hues
-  var ancestorHues = [0, 120, 210, 45, 280, 170];  // red, green, blue, orange, purple, teal
-  function ancestorColor(ancestorIdx, alpha) {
-    var h = ancestorHues[ancestorIdx % ancestorHues.length];
-    return "hsla(" + h + ", 70%, 45%, " + (alpha || 1) + ")";
-  }
-  function ancestorColorLight(ancestorIdx, alpha) {
-    var h = ancestorHues[ancestorIdx % ancestorHues.length];
-    return "hsla(" + h + ", 60%, 65%, " + (alpha || 1) + ")";
-  }
-
-  // Get current version's year from the dropdown text
-  function currentVersionYear() {
-    var opt = versionSelect.options[versionSelect.selectedIndex];
-    if (!opt) return null;
-    var m = opt.textContent.match(/yr\s+(\d+)/);
-    return m ? parseInt(m[1], 10) : null;
-  }
-
-  // Build annotation config for snapshot lines + current version
-  function makeAnnotations() {
-    var annotations = {};
-    tlSnapshots.forEach(function (snap, i) {
-      annotations["snap_" + i] = {
-        type: "line",
-        xMin: snap.year, xMax: snap.year,
-        borderColor: "rgba(150, 150, 150, 0.5)",
-        borderWidth: 1,
-        borderDash: [4, 4],
-        label: { display: false }
-      };
-    });
-    var curYear = currentVersionYear();
-    if (curYear !== null) {
-      annotations["current"] = {
-        type: "line",
-        xMin: curYear, xMax: curYear,
-        borderColor: "#4363d8",
-        borderWidth: 2,
-        label: {
-          display: true,
-          content: "v" + version,
-          position: "start",
-          backgroundColor: "rgba(67, 99, 216, 0.8)",
-          font: { size: 10 },
-          padding: 3
-        }
-      };
-    }
-    return annotations;
-  }
-
-  // Update just the current-version annotation on all charts
-  function updateCurrentVersionMarker() {
-    var curYear = currentVersionYear();
-    [chartPopulation, chartWeather, chartDiversity, chartSpeciation].forEach(function (chart) {
-      if (!chart) return;
-      var ann = chart.options.plugins.annotation.annotations;
-      if (curYear !== null) {
-        ann.current = {
-          type: "line",
-          xMin: curYear, xMax: curYear,
-          borderColor: "#4363d8",
-          borderWidth: 2,
-          label: {
-            display: true,
-            content: "v" + version,
-            position: "start",
-            backgroundColor: "rgba(67, 99, 216, 0.8)",
-            font: { size: 10 },
-            padding: 3
-          }
-        };
-      } else {
-        delete ann.current;
-      }
-      chart.update("none");
-    });
-  }
-
-  // Click on chart near a snapshot: jump to that version
-  function handleChartClick(event, chart) {
-    var xScale = chart.scales.x;
-    if (!xScale) return;
-    var rect = chart.canvas.getBoundingClientRect();
-    var clickX = event.clientX || (event.native && event.native.clientX);
-    if (clickX === undefined) return;
-    var canvasX = clickX - rect.left;
-    var clickYear = xScale.getValueForPixel(canvasX);
-
-    // Find nearest snapshot within 3% of x-range
-    var range = xScale.max - xScale.min;
-    var threshold = range * 0.03;
-    var bestSnap = null;
-    var bestDist = Infinity;
-    tlSnapshots.forEach(function (snap) {
-      var d = Math.abs(snap.year - clickYear);
-      if (d < threshold && d < bestDist) {
-        bestDist = d;
-        bestSnap = snap;
-      }
-    });
-    if (bestSnap) {
-      // Find the version in the dropdown and select it
-      var opts = versionSelect.options;
-      for (var i = 0; i < opts.length; i++) {
-        if (parseInt(opts[i].value, 10) === bestSnap.version_id) {
-          versionSelect.selectedIndex = i;
-          versionSelect.dispatchEvent(new Event("change"));
-          flashVersion();
-          break;
-        }
-      }
-    }
-  }
-
-  function showEmpty(containerId, msg) {
-    var el = document.getElementById(containerId);
-    var canvas = el.querySelector("canvas");
+  function showRideEmpty(msg) {
+    rideProfileData = null;
+    var canvas = document.getElementById("chart-ride");
+    if (chartRide) { chartRide.destroy(); chartRide = null; }
     canvas.style.display = "none";
-    var div = document.createElement("div");
-    div.className = "tl-empty";
-    div.textContent = msg || "No timeline data";
-    el.appendChild(div);
+    var legendEl = document.getElementById("ride-legend");
+    if (legendEl) legendEl.innerHTML = "";
+    rideKmEl = null;
+    rideEmpty.style.display = "block";
+    rideEmpty.textContent = msg;
   }
 
-  function buildPopulationChart(data) {
-    if (!data || !data.years || data.years.length === 0) {
-      showEmpty("tl-population");
+  // The readout lives in an HTML panel to the right of the plot (never over
+  // the data). buildRideLegend draws the rows; rideTooltipExternal fills in
+  // live values as you hover.
+  var rideValueSpans = {};   // datasetIndex → value <span>
+  var rideKmEl = null;
+
+  function buildRideLegend(datasets) {
+    var legendEl = document.getElementById("ride-legend");
+    legendEl.innerHTML = "";
+    rideValueSpans = {};
+
+    rideKmEl = document.createElement("div");
+    rideKmEl.className = "rl-km";
+    rideKmEl.textContent = "—";
+    legendEl.appendChild(rideKmEl);
+
+    datasets.forEach(function (ds, idx) {
+      var row = document.createElement("div");
+      row.className = "rl-row";
+      var sw = document.createElement("span");
+      sw.className = "rl-sw";
+      sw.style.background = ds.borderColor;
+      var name = document.createElement("span");
+      name.className = "rl-name";
+      name.textContent = ds.label;
+      name.title = ds.label;
+      var val = document.createElement("span");
+      val.className = "rl-val";
+      row.appendChild(sw);
+      row.appendChild(name);
+      row.appendChild(val);
+      row.onclick = function () {
+        var vis = chartRide.isDatasetVisible(idx);
+        chartRide.setDatasetVisibility(idx, !vis);
+        chartRide.update();
+        row.classList.toggle("rl-off", vis);
+      };
+      legendEl.appendChild(row);
+      rideValueSpans[idx] = val;
+    });
+  }
+
+  function rideTooltipExternal(context) {
+    var tt = context.tooltip;
+    if (rideKmEl === null) return;
+    function clear() {
+      rideKmEl.textContent = "—";
+      Object.keys(rideValueSpans).forEach(function (k) { rideValueSpans[k].textContent = ""; });
+    }
+    if (!tt || tt.opacity === 0 || !tt.dataPoints || tt.dataPoints.length === 0) {
+      clear();
       return;
     }
+    rideKmEl.textContent = "km " + tt.dataPoints[0].parsed.x.toFixed(1);
+    Object.keys(rideValueSpans).forEach(function (k) { rideValueSpans[k].textContent = ""; });
+    tt.dataPoints.forEach(function (dp) {
+      var s = rideValueSpans[dp.datasetIndex];
+      if (s) s.textContent = dp.parsed.y.toFixed(2);
+    });
+  }
 
-    // Group species by ancestor
-    var speciesIds = Object.keys(data.species || {});
-    if (speciesIds.length === 0) { showEmpty("tl-population"); return; }
-
-    // Parse ancestor from species_id: "anc_02_valley_tree" -> ancestor index 2
-    function getAncestor(sid) {
-      var m = sid.match(/^anc_(\d+)/);
-      return m ? parseInt(m[1], 10) : 0;
+  function buildRideChart(data) {
+    var species = (data && data.species) || {};
+    var sids = Object.keys(species);
+    if (sids.length === 0) {
+      showRideEmpty("No species visible along the ride at this version.");
+      return;
     }
+    var canvas = document.getElementById("chart-ride");
+    canvas.style.display = "block";
+    rideEmpty.style.display = "none";
+    if (chartRide) { chartRide.destroy(); chartRide = null; }
 
-    // Build ancestor groups
-    var ancestorGroups = {};
-    speciesIds.forEach(function (sid) {
-      var anc = getAncestor(sid);
-      if (!ancestorGroups[anc]) ancestorGroups[anc] = [];
-      ancestorGroups[anc].push(sid);
+    var distKm = data.distances.map(function (d) { return d / 1000.0; });
+    var colors = data.colors || {};
+    // Most abundant first (legend order)
+    sids.sort(function (a, b) {
+      function sum(s) { return species[s].reduce(function (x, y) { return x + y; }, 0); }
+      return sum(b) - sum(a);
     });
-
-    // One thick line per ancestor (summed densities)
-    var datasets = [];
-    var ancestorKeys = Object.keys(ancestorGroups).sort(function (a, b) { return a - b; });
-    ancestorKeys.forEach(function (ancIdx) {
-      var sids = ancestorGroups[ancIdx];
-      var summed = data.years.map(function (_, yi) {
-        var sum = 0;
-        sids.forEach(function (sid) { sum += (data.species[sid][yi] || 0); });
-        return sum;
-      });
-      datasets.push({
-        label: "Ancestor " + ancIdx + " (" + sids.length + " spp)",
-        data: summed,
-        borderColor: ancestorColor(parseInt(ancIdx)),
-        backgroundColor: ancestorColorLight(parseInt(ancIdx), 0.1),
-        borderWidth: 2,
+    var datasets = sids.map(function (sid) {
+      var c = colors[sid] || [120, 120, 120];
+      return {
+        label: sid.replace(/^anc_\d+_/, ""),
+        data: species[sid].map(function (d, i) { return { x: distKm[i], y: d }; }),
+        borderColor: rgbStr(c),
+        backgroundColor: rgbaStr(c, 0.15),
+        borderWidth: 1.5,
         pointRadius: 0,
-        tension: 0.3,
-        fill: false
-      });
+        tension: 0.2,
+        fill: true
+      };
     });
 
-    var ctx = document.getElementById("chart-population").getContext("2d");
-    chartPopulation = new Chart(ctx, {
+    var ctx = canvas.getContext("2d");
+    chartRide = new Chart(ctx, {
       type: "line",
-      data: { labels: data.years, datasets: datasets },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        interaction: { mode: "index", intersect: false },
-        plugins: {
-          legend: { position: "right", labels: { boxWidth: 12, font: { size: 10 } } },
-          annotation: { annotations: makeAnnotations() },
-          tooltip: { callbacks: { label: function (ctx) { return ctx.dataset.label + ": " + ctx.parsed.y.toFixed(2); } } }
-        },
-        scales: {
-          x: { title: { display: true, text: "Year", font: { size: 11 } }, ticks: { font: { size: 10 } } },
-          y: { title: { display: true, text: "Total density", font: { size: 11 } }, ticks: { font: { size: 10 } }, beginAtZero: true }
-        },
-        onClick: function (event) { handleChartClick(event, chartPopulation); }
-      }
-    });
-  }
-
-  function buildWeatherChart(data) {
-    if (!data || !data.years || data.years.length === 0) {
-      showEmpty("tl-weather");
-      return;
-    }
-
-    var datasets = [];
-    // Temperature on left axis
-    if (data.temperature) {
-      datasets.push({
-        label: "Temperature",
-        data: data.temperature,
-        borderColor: "#e05530",
-        backgroundColor: "rgba(224, 85, 48, 0.05)",
-        borderWidth: 2,
-        pointRadius: 0,
-        tension: 0.3,
-        yAxisID: "yTemp",
-        fill: false,
-        order: 1
-      });
-    }
-    // Drought as filled area on temp axis
-    if (data.drought) {
-      datasets.push({
-        label: "Drought",
-        data: data.drought.map(function (d, i) { return d ? data.temperature[i] : null; }),
-        borderColor: "transparent",
-        backgroundColor: "rgba(255, 180, 60, 0.25)",
-        borderWidth: 0,
-        pointRadius: 0,
-        fill: "origin",
-        yAxisID: "yTemp",
-        order: 2,
-        spanGaps: false
-      });
-    }
-    // Precipitation on right axis
-    if (data.precipitation) {
-      datasets.push({
-        label: "Precipitation",
-        data: data.precipitation,
-        borderColor: "#3388cc",
-        backgroundColor: "rgba(51, 136, 204, 0.05)",
-        borderWidth: 2,
-        pointRadius: 0,
-        tension: 0.3,
-        yAxisID: "yPrecip",
-        fill: false,
-        order: 1
-      });
-    }
-
-    var scales = {
-      x: { title: { display: true, text: "Year", font: { size: 11 } }, ticks: { font: { size: 10 } } },
-      yTemp: {
-        type: "linear", position: "left",
-        title: { display: true, text: "Temperature", font: { size: 11 }, color: "#e05530" },
-        ticks: { font: { size: 10 }, color: "#e05530" },
-        grid: { drawOnChartArea: true }
-      },
-      yPrecip: {
-        type: "linear", position: "right",
-        title: { display: true, text: "Precipitation", font: { size: 11 }, color: "#3388cc" },
-        ticks: { font: { size: 10 }, color: "#3388cc" },
-        grid: { drawOnChartArea: false },
-        beginAtZero: true
-      }
-    };
-
-    var ctx = document.getElementById("chart-weather").getContext("2d");
-    chartWeather = new Chart(ctx, {
-      type: "line",
-      data: { labels: data.years, datasets: datasets },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        interaction: { mode: "index", intersect: false },
-        plugins: {
-          legend: { position: "right", labels: { boxWidth: 12, font: { size: 10 } } },
-          annotation: { annotations: makeAnnotations() }
-        },
-        scales: scales,
-        onClick: function (event) { handleChartClick(event, chartWeather); }
-      }
-    });
-  }
-
-  function buildDiversityChart(data) {
-    if (!data || !data.years || data.years.length === 0) {
-      showEmpty("tl-diversity");
-      return;
-    }
-
-    var datasets = [];
-    // Total density as filled area
-    if (data.total_density) {
-      datasets.push({
-        label: "Total density",
-        data: data.total_density,
-        borderColor: "rgba(100, 160, 80, 0.5)",
-        backgroundColor: "rgba(100, 160, 80, 0.12)",
-        borderWidth: 1,
-        pointRadius: 0,
-        fill: true,
-        yAxisID: "yDensity",
-        order: 2
-      });
-    }
-    // Species count on left axis
-    if (data.species_count) {
-      datasets.push({
-        label: "Species count",
-        data: data.species_count,
-        borderColor: "#333",
-        borderWidth: 2,
-        pointRadius: 0,
-        tension: 0.3,
-        fill: false,
-        yAxisID: "yCount",
-        order: 1
-      });
-    }
-    // Shannon diversity on right axis
-    if (data.shannon) {
-      datasets.push({
-        label: "Shannon diversity",
-        data: data.shannon,
-        borderColor: "#9b59b6",
-        borderWidth: 2,
-        pointRadius: 0,
-        tension: 0.3,
-        fill: false,
-        yAxisID: "yShannon",
-        order: 1
-      });
-    }
-
-    var scales = {
-      x: { title: { display: true, text: "Year", font: { size: 11 } }, ticks: { font: { size: 10 } } },
-      yCount: {
-        type: "linear", position: "left",
-        title: { display: true, text: "Species count", font: { size: 11 }, color: "#333" },
-        ticks: { font: { size: 10 } },
-        beginAtZero: true,
-        grid: { drawOnChartArea: true }
-      },
-      yShannon: {
-        type: "linear", position: "right",
-        title: { display: true, text: "Shannon H'", font: { size: 11 }, color: "#9b59b6" },
-        ticks: { font: { size: 10 }, color: "#9b59b6" },
-        grid: { drawOnChartArea: false }
-      },
-      yDensity: {
-        type: "linear", position: "right",
-        display: false,
-        beginAtZero: true
-      }
-    };
-
-    var ctx = document.getElementById("chart-diversity").getContext("2d");
-    chartDiversity = new Chart(ctx, {
-      type: "line",
-      data: { labels: data.years, datasets: datasets },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        interaction: { mode: "index", intersect: false },
-        plugins: {
-          legend: { position: "right", labels: { boxWidth: 12, font: { size: 10 } } },
-          annotation: { annotations: makeAnnotations() }
-        },
-        scales: scales,
-        onClick: function (event) { handleChartClick(event, chartDiversity); }
-      }
-    });
-  }
-
-  function buildSpeciationChart(data) {
-    if (!data || !data.species || data.species.length === 0) {
-      showEmpty("tl-speciation", "No speciation data");
-      return;
-    }
-
-    var species = data.species;
-    var maxYear = data.max_year || 1000;
-
-    // Assign y-position: group by ancestor, then order by appeared_year
-    // within each ancestor group
-    var byAncestor = {};
-    species.forEach(function (sp) {
-      var a = sp.ancestor;
-      if (!byAncestor[a]) byAncestor[a] = [];
-      byAncestor[a].push(sp);
-    });
-
-    var ancestorKeys = Object.keys(byAncestor).sort(function (a, b) { return a - b; });
-    var yPos = {};  // species_id -> y position
-    var yCounter = 0;
-    var ancestorBands = [];  // {ancestor, yStart, yEnd} for background shading
-
-    ancestorKeys.forEach(function (ancIdx) {
-      var group = byAncestor[ancIdx];
-      group.sort(function (a, b) { return a.appeared_year - b.appeared_year; });
-      var yStart = yCounter;
-      group.forEach(function (sp) {
-        yPos[sp.species_id] = yCounter;
-        yCounter++;
-      });
-      ancestorBands.push({ ancestor: parseInt(ancIdx), yStart: yStart, yEnd: yCounter - 1 });
-    });
-
-    var totalSpecies = yCounter;
-
-    // Build datasets: one line segment per species (appeared -> extinct/maxYear)
-    // and vertical branch lines connecting parent to child
-    var datasets = [];
-
-    // Species lifespan lines — one dataset per ancestor for legend grouping
-    ancestorKeys.forEach(function (ancIdx) {
-      var group = byAncestor[ancIdx];
-      var color = ancestorColor(parseInt(ancIdx));
-
-      // Each species is a segment: [{x: appeared, y: yPos}, {x: end, y: yPos}]
-      // Use individual datasets per species for proper line rendering
-      group.forEach(function (sp, i) {
-        var endYear = sp.extinct_year !== null ? sp.extinct_year : maxYear;
-        var y = yPos[sp.species_id];
-
-        // Compute max density for this species to scale line width
-        var maxDensity = 0;
-        if (sp.population) {
-          sp.population.forEach(function (p) {
-            if (p.density > maxDensity) maxDensity = p.density;
-          });
-        }
-        var lineWidth = maxDensity > 0 ? Math.max(1.5, Math.min(6, maxDensity / 5000)) : 1.5;
-
-        // Display name: strip ancestor prefix for readability
-        var displayName = sp.species_id.replace(/^anc_\d+_/, "");
-        if (displayName === sp.species_id) displayName = sp.species_id;
-
-        datasets.push({
-          label: i === 0 ? "Ancestor " + ancIdx + " (" + group.length + " spp)" : "",
-          data: [{ x: sp.appeared_year, y: y }, { x: endYear, y: y }],
-          borderColor: sp.extinct_year !== null ? ancestorColorLight(parseInt(ancIdx), 0.5) : color,
-          borderWidth: lineWidth,
-          pointRadius: [3, 0],  // dot at origin, nothing at end
-          pointBackgroundColor: color,
-          pointBorderColor: color,
-          showLine: true,
-          fill: false,
-          _speciesId: sp.species_id,
-          _displayName: displayName,
-          _ancestor: parseInt(ancIdx),
-          _extinct: sp.extinct_year !== null
-        });
-      });
-    });
-
-    // Branch lines: vertical dashed lines from parent's y to child's y at child's appeared_year
-    species.forEach(function (sp) {
-      if (sp.parent_id && yPos[sp.parent_id] !== undefined) {
-        var parentY = yPos[sp.parent_id];
-        var childY = yPos[sp.species_id];
-        datasets.push({
-          label: "",
-          data: [{ x: sp.appeared_year, y: parentY }, { x: sp.appeared_year, y: childY }],
-          borderColor: "rgba(150, 150, 150, 0.4)",
-          borderWidth: 1,
-          borderDash: [3, 3],
-          pointRadius: 0,
-          showLine: true,
-          fill: false
-        });
-      }
-    });
-
-    // Build y-axis labels (species names, abbreviated)
-    var yLabels = new Array(totalSpecies);
-    species.forEach(function (sp) {
-      var y = yPos[sp.species_id];
-      var name = sp.species_id.replace(/^anc_\d+_/, "").substring(0, 20);
-      yLabels[y] = name;
-    });
-
-    var ctx = document.getElementById("chart-speciation").getContext("2d");
-    chartSpeciation = new Chart(ctx, {
-      type: "scatter",
       data: { datasets: datasets },
       options: {
         responsive: true,
         maintainAspectRatio: false,
-        interaction: {
-          mode: "nearest",
-          intersect: false,
-          axis: "y"
-        },
+        animation: false,
+        parsing: false,
+        normalized: true,
+        interaction: { mode: "index", intersect: false },
         plugins: {
-          legend: {
-            position: "right",
-            labels: {
-              boxWidth: 12,
-              font: { size: 10 },
-              filter: function (item) { return item.text !== ""; }
-            }
-          },
-          annotation: { annotations: makeAnnotations() },
-          tooltip: {
-            callbacks: {
-              label: function (ctx) {
-                var ds = ctx.dataset;
-                if (!ds._speciesId) return "";
-                var status = ds._extinct ? " (extinct)" : " (extant)";
-                return ds._speciesId + status;
-              }
-            }
-          }
+          legend: { display: false },  // replaced by the HTML readout legend on the right
+          annotation: { annotations: {} },
+          tooltip: { enabled: false, external: rideTooltipExternal }
         },
         scales: {
-          x: {
-            type: "linear",
-            title: { display: true, text: "Year", font: { size: 11 } },
-            ticks: { font: { size: 10 } },
-            min: 0,
-            max: maxYear
-          },
-          y: {
-            type: "linear",
-            reverse: false,
-            title: { display: false },
-            min: -0.5,
-            max: totalSpecies - 0.5,
-            ticks: {
-              font: { size: 9 },
-              stepSize: 1,
-              callback: function (value) {
-                var idx = Math.round(value);
-                return yLabels[idx] || "";
-              }
-            },
-            grid: { display: false }
-          }
-        },
-        onClick: function (event) { handleChartClick(event, chartSpeciation); }
+          x: { type: "linear", title: { display: true, text: "Distance along ride (km)", font: { size: 11 } }, ticks: { font: { size: 10 } } },
+          y: { title: { display: true, text: "Density (strip mean)", font: { size: 11 } }, ticks: { font: { size: 10 } }, beginAtZero: true }
+        }
       }
     });
+
+    buildRideLegend(datasets);
+
+    // Hover the profile → move the cursor on the map path.
+    canvas.onmousemove = function (e) {
+      if (!chartRide || !rideCumDist) return;
+      var rect = canvas.getBoundingClientRect();
+      var km = chartRide.scales.x.getValueForPixel(e.clientX - rect.left);
+      if (km === null || isNaN(km)) return;
+      setRideCursor(km * 1000.0);
+    };
+    canvas.onmouseleave = function () { clearRideCursor(); };
+
+    // Click the profile → inspect that world location, exactly as clicking
+    // the corresponding point on the map (opens the inspection sidebar).
+    canvas.onclick = function (e) {
+      if (!chartRide || !rideCumDist) return;
+      var rect = canvas.getBoundingClientRect();
+      var km = chartRide.scales.x.getValueForPixel(e.clientX - rect.left);
+      if (km === null || isNaN(km)) return;
+      var distM = Math.max(0, Math.min(rideTotalDist, km * 1000.0));
+      var pos = positionAtDistance(distM);
+      if (!pos) return;
+      setRideCursor(distM);
+      selectPoint(metersToMap(pos.x, pos.y), { x: pos.x, y: pos.y });
+    };
   }
 
-  function loadTimelineData() {
-    // Fetch all timeline data in parallel
-    var fetches = [
-      fetch("/api/timeline/species").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
-      fetch("/api/timeline/weather").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
-      fetch("/api/timeline/diversity").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
-      fetch("/api/timeline/snapshots").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
-      fetch("/api/timeline/speciation").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; })
-    ];
-
-    Promise.all(fetches).then(function (results) {
-      tlSpeciesData = results[0];
-      tlWeatherData = results[1];
-      tlDiversityData = results[2];
-      tlSnapshots = results[3] || [];
-      tlSpeciationData = results[4];
-
-      buildPopulationChart(tlSpeciesData);
-      buildWeatherChart(tlWeatherData);
-      buildDiversityChart(tlDiversityData);
-      buildSpeciationChart(tlSpeciationData);
-      tlDataLoaded = true;
+  // Vertical cursor line on the profile, throttled to animation frames.
+  var _cursorRaf = null, _pendingCursorKm;
+  function setChartCursorLine(km) {
+    if (!chartRide) return;
+    _pendingCursorKm = km;
+    if (_cursorRaf) return;
+    _cursorRaf = requestAnimationFrame(function () {
+      _cursorRaf = null;
+      if (!chartRide) return;
+      var ann = chartRide.options.plugins.annotation.annotations;
+      if (_pendingCursorKm === null || _pendingCursorKm === undefined) {
+        delete ann.cursor;
+      } else {
+        ann.cursor = {
+          type: "line", xMin: _pendingCursorKm, xMax: _pendingCursorKm,
+          borderColor: "#e6194b", borderWidth: 1.5
+        };
+      }
+      chartRide.update("none");
     });
   }
 
-  // Hook into version changes to update the current-version marker
+  function loadRideProfile() {
+    rideProfileVersion = version;
+    var reqVersion = version;
+    fetch("/api/world/" + reqVersion + "/ride_profile")
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+      .then(function (res) {
+        if (reqVersion !== version) return;  // a newer request superseded this
+        if (!res.ok || !res.body || res.body.error) {
+          showRideEmpty((res.body && res.body.error) || "No ride path. Run ride-experience first.");
+          return;
+        }
+        rideProfileData = res.body;
+        buildRideChart(res.body);
+      })
+      .catch(function () { showRideEmpty("Failed to load ride profile."); });
+  }
+
+  // Re-sample the ride whenever the version changes (if the panel is open).
   versionSelect.addEventListener("change", function () {
-    if (tlDataLoaded) {
-      // Small delay to let version variable update first
-      setTimeout(updateCurrentVersionMarker, 50);
-    }
+    if (tlOpen) loadRideProfile();
   });
+
 })();
 </script>
 </body>

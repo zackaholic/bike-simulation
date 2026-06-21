@@ -14,6 +14,9 @@ Zoom levels:
 
 from __future__ import annotations
 
+import colorsys
+import hashlib
+import re
 from pathlib import Path
 
 import numpy as np
@@ -132,6 +135,56 @@ _LUT_NAMES: dict[int, str] = {
 }
 
 
+# ── Per-species colors ────────────────────────────────────────────
+#
+# Every species density layer gets its own distinct, lineage-coherent hue
+# so overlapping/compared species are legible (the old code mapped all
+# "density" layers to a single green ramp, which made them indistinguishable).
+# Species are rendered as RGBA tiles: hue is constant per species, density
+# drives the alpha channel so absent cells are transparent.
+
+_SPECIES_DENSITY_RE: re.Pattern[str] = re.compile(r"^species_(.+)_density$")
+
+# Golden-angle hue spacing: ancestor index n → hue (n * 137.508°) mod 360.
+# This spreads any number of ancestors evenly around the color wheel with no
+# collisions and no clustering (the old fixed 8-hue palette put 3 hues in the
+# green/teal band and aliased ancestors ≥8 onto each other, e.g. anc_05/anc_13).
+_GOLDEN_ANGLE: float = 137.508
+
+
+def species_id_of(layer_name: str) -> str | None:
+    """Return the species id for a ``species_<id>_density`` layer, else None."""
+    m = _SPECIES_DENSITY_RE.match(layer_name)
+    return m.group(1) if m else None
+
+
+def _stable_hash(s: str) -> int:
+    """Process-stable hash (Python's builtin hash() is salted per run)."""
+    return int(hashlib.md5(s.encode()).hexdigest()[:8], 16)
+
+
+def species_color(species_id: str) -> tuple[int, int, int]:
+    """Return a distinct RGB color for a species, coherent within a lineage.
+
+    The ancestor index sets a base hue via golden-angle spacing (so distinct
+    ancestors get well-separated hues); species sharing an ``anc_<n>`` ancestor
+    cluster near that hue with small deterministic offsets in hue/saturation/
+    value so siblings stay distinguishable without leaving the family.
+    """
+    m = re.match(r"^anc_(\d+)", species_id)
+    anc = int(m.group(1)) if m else _stable_hash(species_id) % 360
+    base_hue = (anc * _GOLDEN_ANGLE) % 360.0
+
+    h = _stable_hash(species_id)
+    hue_off = (h % 21) - 10          # -10..+10 degrees within the lineage
+    sat = 0.70 + ((h >> 8) % 26) / 100.0   # 0.70..0.95
+    val = 0.82 + ((h >> 16) % 14) / 100.0  # 0.82..0.95
+
+    hue = ((base_hue + hue_off) % 360) / 360.0
+    r, g, b = colorsys.hsv_to_rgb(hue, min(sat, 1.0), min(val, 1.0))
+    return (int(r * 255), int(g * 255), int(b * 255))
+
+
 def _get_lut(layer_name: str) -> np.ndarray:
     """Return the appropriate LUT for a layer, defaulting to viridis."""
     # Species density layers use greens
@@ -142,6 +195,8 @@ def _get_lut(layer_name: str) -> np.ndarray:
 
 def get_colormap_name(layer_name: str) -> str:
     """Return the colormap name string for a layer."""
+    if species_id_of(layer_name) is not None:
+        return "species"
     lut = _get_lut(layer_name)
     return _LUT_NAMES.get(id(lut), "viridis")
 
@@ -165,12 +220,16 @@ def get_layer_info(
     units = _LAYER_UNITS.get(layer_name, "")
     if "density" in layer_name:
         units = ""
-    return {
+    info = {
         "vmin": vmin,
         "vmax": vmax,
         "colormap": get_colormap_name(layer_name),
         "units": units,
     }
+    sid = species_id_of(layer_name)
+    if sid is not None:
+        info["color"] = list(species_color(sid))
+    return info
 
 
 # ── Tile coordinate math ─────────────────────────────────────────
@@ -281,16 +340,33 @@ def render_tile(
     col_idx = np.clip(col_idx, 0, src_cols - 1)
     data = crop[np.ix_(row_idx, col_idx)]
 
-    # Apply colormap with global normalization
-    indices = _normalize(data, layer_name, vmin, vmax)
-    lut = _get_lut(layer_name)
-    rgb = lut[indices]  # (256, 256, 3)
+    sid = species_id_of(layer_name)
+    if sid is not None:
+        # Species: constant hue, density drives alpha (absent → transparent).
+        if vmax - vmin < 1e-10:
+            alpha = np.zeros(data.shape, dtype=np.uint8)
+        else:
+            norm = np.clip((data - vmin) / (vmax - vmin), 0.0, 1.0)
+            alpha = (norm * 255).astype(np.uint8)
+        color = species_color(sid)
+        rgba = np.empty((*data.shape, 4), dtype=np.uint8)
+        rgba[..., 0] = color[0]
+        rgba[..., 1] = color[1]
+        rgba[..., 2] = color[2]
+        rgba[..., 3] = alpha
+        rgba = rgba[::-1]  # raster row 0 is south; image row 0 is north
+        img = Image.fromarray(rgba, mode="RGBA")
+    else:
+        # Apply colormap with global normalization
+        indices = _normalize(data, layer_name, vmin, vmax)
+        lut = _get_lut(layer_name)
+        rgb = lut[indices]  # (256, 256, 3)
 
-    # Flip vertically: raster row 0 is south (bottom), but image row 0 is top
-    rgb = rgb[::-1]
+        # Flip vertically: raster row 0 is south (bottom), but image row 0 is top
+        rgb = rgb[::-1]
 
-    # Encode as PNG via Pillow
-    img = Image.fromarray(rgb, mode="RGB")
+        # Encode as PNG via Pillow
+        img = Image.fromarray(rgb, mode="RGB")
 
     # Save to cache
     cache_path.parent.mkdir(parents=True, exist_ok=True)
