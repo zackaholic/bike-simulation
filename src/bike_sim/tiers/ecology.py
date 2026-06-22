@@ -404,6 +404,14 @@ class EcologyTier:
         # rebound when conditions return. 0.0 = off. This is what lets wet
         # specialists survive dry centuries (and vice versa) for full cyclic swings.
         self.refugium_floor = 0.0
+        # Allee establishment threshold. When > 0, positive (colonizing) growth
+        # is scaled by density/(density+allee_theta), so near-empty cells cannot
+        # self-bootstrap from a stray propagule — they must be recolonized by
+        # sustained dispersal from a real source. This makes disturbance scars
+        # refill slowly from their edges (and lets some persist), and is what
+        # makes priority/incumbency effects produce *lasting* idiosyncratic
+        # patches. 0.0 = off (no positive density dependence; current behavior).
+        self.allee_theta = 0.0
         # Per-species mechanism multipliers, identity by default. Maps
         # species_id -> {mechanism: multiplier} where mechanism is one of
         # "growth", "mortality", "dispersal", "carrying_capacity". The tier
@@ -754,6 +762,13 @@ class EcologyTier:
                 density * genome["growth_rate"] * logistic * 0.25
                 * self._modifier(sid, "growth")
             )
+
+            # Allee effect: gate *colonizing* (positive) growth by local density
+            # so near-empty cells can't self-bootstrap (negative die-back growth
+            # is left untouched). Off when allee_theta == 0.
+            if self.allee_theta > 0.0:
+                allee = density / (density + self.allee_theta)
+                growth = np.where(growth > 0.0, growth * allee, growth)
 
             # Mortality: fixed base rate from lifespan (per seasonal tick)
             base_turnover = 1.0 / (genome["lifespan"] * float(self.TICKS_PER_YEAR))

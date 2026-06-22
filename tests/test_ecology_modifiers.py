@@ -185,6 +185,53 @@ class TestHookBehaviour:
         assert _totals(wb)[target] < _totals(wa)[target]
 
 
+class TestAlleeThreshold:
+    """The Allee establishment threshold (positive density dependence).
+
+    With ``allee_theta > 0``, colonizing growth in near-empty cells is gated
+    by ``density/(density+theta)``, so a sub-threshold sparse population can't
+    self-bootstrap — it needs a dense source to recolonize from. Off by default
+    (``allee_theta == 0``), so it never changes existing runs.
+    """
+
+    def test_off_by_default(self, eco_world):
+        assert EcologyTier(eco_world).allee_theta == 0.0
+
+    def test_allee_suppresses_sparse_establishment(self, twin_worlds):
+        """A sparse, sub-threshold field grows in the control but not with Allee.
+
+        We isolate colonizing growth: zero every species, then seed only the
+        target at a uniform sub-threshold density. With no competitors, the
+        control grows logistically everywhere; with Allee on, that growth is
+        gated down to a trickle, so the treatment ends well below the control.
+        """
+        wa, wb = twin_worlds
+        eco_a, eco_b = _configure(EcologyTier(wa)), _configure(EcologyTier(wb))
+        _warm_up(eco_a, 1)  # one tick just to create ancestors + density layers
+        _warm_up(eco_b, 1)
+        target = max(_totals(wb), key=_totals(wb).get)
+        species_ids = [sp["species_id"] for sp in wb.events.list_species()]
+
+        zero = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float64)
+        sparse = np.full((GRID_SIZE, GRID_SIZE), 0.4, dtype=np.float64)
+        for w in (wa, wb):
+            tick = w.tier_clocks["ecology"].tick_number
+            for sid in species_ids:
+                arr = sparse.copy() if sid == target else zero.copy()
+                w.rasters.write_layer("ecology", f"species_{sid}_density", arr, tick)
+
+        eco_b.allee_theta = 3.0  # Allee ON for the treatment only
+        for t in range(1, 7):
+            eco_a.tick(make_weather(t % 4))
+            eco_b.tick(make_weather(t % 4))
+
+        a_after = _totals(wa)[target]
+        b_after = _totals(wb)[target]
+        assert b_after < a_after, (
+            "Allee should suppress sub-threshold establishment relative to control"
+        )
+
+
 # ---------------------------------------------------------------------------
 # 2. Harness resolver
 # ---------------------------------------------------------------------------
