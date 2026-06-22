@@ -496,6 +496,22 @@ class EcologyTier:
     def _create_ancestors(self, tick_number: int) -> None:
         rng = create_rng(self._world.seed, "ecology", "ancestors", tick_number)
 
+        # Redistribute the moisture niche onto the world's achievable climate
+        # manifold. This world's temperature and precipitation are correlated
+        # (here anticorrelated ~-0.5: warm lowlands are dry, cold uplands wet),
+        # so the warm-AND-wet (and cold-AND-dry) corners never occur. Archetypes
+        # placed there by hand strand at the refugium floor forever. We keep each
+        # archetype's temperature identity (frost_tolerance) and structure, and
+        # derive drought_tolerance by *conditioning on the realized climate*:
+        # for the archetype's warmth, use the moisture the world actually pairs
+        # with that temperature (mean drought_stress of nearby cells), plus
+        # jitter scaled to the local spread. That guarantees every niche lands
+        # on the manifold rather than in an unreachable corner.
+        niche_cloud = self._climate_niche_cloud()
+        if niche_cloud is not None:
+            tn_cloud, ds_cloud = niche_cloud
+            tn_lo, tn_hi = (float(x) for x in np.percentile(tn_cloud, [2, 98]))
+
         for idx, (name, template) in enumerate(_ANCESTOR_TEMPLATES):
             genome = {}
             for key, val in template.items():
@@ -515,12 +531,48 @@ class EcologyTier:
                     ):
                         genome[key] = float(np.clip(genome[key], 0.0, 1.0))
 
+            # Override drought_tolerance by conditioning on the realized climate
+            # at this archetype's warmth (see comment above).
+            if niche_cloud is not None:
+                warmth = float(np.clip(1.0 - genome["frost_tolerance"], tn_lo, tn_hi))
+                mask = np.abs(tn_cloud - warmth) < 0.12
+                if int(mask.sum()) < 100:
+                    mask = np.abs(tn_cloud - warmth) < 0.25
+                if int(mask.sum()) < 20:
+                    ds_target, ds_std = float(ds_cloud.mean()), float(ds_cloud.std())
+                else:
+                    ds_target = float(ds_cloud[mask].mean())
+                    ds_std = float(ds_cloud[mask].std())
+                jitter = rng.uniform(-1.0, 1.0) * min(ds_std, 0.12)
+                genome["drought_tolerance"] = float(np.clip(ds_target + jitter, 0.05, 0.95))
+
             self._world.events.add_species(
                 species_id=f"anc_{idx:02d}_{name}",
                 genome=genome,
                 parent_id=None,
                 appeared_year=0.0,
             )
+
+    def _climate_niche_cloud(self) -> tuple[NDArray[np.float64], NDArray[np.float64]] | None:
+        """Realized (temp_norm, drought_stress) point cloud from current climate.
+
+        Normalizes the current temperature/precipitation rasters onto the same
+        axes the suitability function uses, subsampled for speed. Returns
+        ``(temp_norm, drought_stress)`` flat arrays, or None if climate layers
+        are unavailable (then ancestor moisture niches fall back to templates).
+        """
+        store = self._world.rasters
+        try:
+            temp = store.read_layer("climate_hydrology", "temperature").ravel()
+            precip = store.read_layer("climate_hydrology", "precipitation").ravel()
+        except KeyError:
+            return None
+        step = max(1, temp.size // 50_000)
+        tn = np.clip((temp[::step] - TEMP_REF_MIN) / (TEMP_REF_MAX - TEMP_REF_MIN), 0, 1)
+        ds = 1.0 - np.clip(
+            (precip[::step] - PRECIP_REF_MIN) / (PRECIP_REF_MAX - PRECIP_REF_MIN), 0, 1
+        )
+        return tn, ds
 
     # ── initial populations ────────────────────────────────────────
 

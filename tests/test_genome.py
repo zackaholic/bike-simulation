@@ -13,12 +13,11 @@ import numpy as np
 import pytest
 
 from bike_sim.tiers.climate_hydrology import ClimateHydrologyTier
-from bike_sim.tiers.ecology import EcologyTier, _CORE_TRAITS
-from bike_sim.tiers.geology import GeologyTier
-from bike_sim.weather import SeasonalWeather, WeatherSystem
-from bike_sim.world import World
-
+from bike_sim.tiers.ecology import _CORE_TRAITS, EcologyTier
 from bike_sim.tiers.erosion import ErosionParams
+from bike_sim.tiers.geology import GeologyTier
+from bike_sim.weather import WeatherSystem
+from bike_sim.world import World
 
 FAST_EROSION = ErosionParams(num_particles=100, max_lifetime=30)
 
@@ -178,6 +177,11 @@ class TestAncestorTraitValues:
 
         The perturbation range is [-0.05, 0.05] for each trait, so actual
         values should be within 0.05 of the template value.
+
+        Exception: ``drought_tolerance`` is intentionally NOT template-bound.
+        It is remapped at creation onto the world's achievable climate manifold
+        (warmth → dryness) so no archetype strands in an unreachable corner, so
+        it can legitimately differ a lot from the template's starting intent.
         """
         from bike_sim.tiers.ecology import _ANCESTOR_TEMPLATES
 
@@ -191,6 +195,8 @@ class TestAncestorTraitValues:
             )
             sid, genome = matches[0]
             for trait, expected in template_genome.items():
+                if trait == "drought_tolerance":
+                    continue  # world-derived; see docstring
                 actual = genome[trait]
                 if trait == "dispersal_range":
                     # Integer trait: allow +-1 from rounding
@@ -201,6 +207,57 @@ class TestAncestorTraitValues:
                     assert abs(actual - expected) <= 0.05 + 1e-9, (
                         f"Ancestor {sid}: {trait}={actual}, expected within 0.05 of {expected}"
                     )
+
+    def test_no_ancestor_stranded_off_manifold(self, eco_world):
+        """Every ancestor must reach strong suitability somewhere in the cycle.
+
+        After moisture-niche redistribution, no archetype should be stuck in an
+        unreachable climate corner (the old warm-wet stranding). Because the
+        climate drifts aperiodically, a wet specialist is only viable at a wet
+        phase, so we sample the realized climate across a wide window (many
+        years × seasons) and require each species' peak suitability over that
+        whole envelope to clear a healthy bar.
+        """
+        from bike_sim.tiers.ecology import (
+            PRECIP_REF_MAX,
+            PRECIP_REF_MIN,
+            TEMP_REF_MAX,
+            TEMP_REF_MIN,
+            _gaussian_match,
+        )
+
+        heightmap = eco_world.rasters.read_layer("geology", "heightmap")
+        ws = WeatherSystem(eco_world.seed, heightmap)
+
+        # Build a cloud of realized (temp_norm, drought_stress) points across a
+        # wide climate window (captures wet peaks and dry troughs).
+        tn_cloud, ds_cloud = [], []
+        for year in np.linspace(0.0, 600.0, 10):
+            for season in range(4):
+                w = ws.generate(float(year), season)
+                t = w.temperature[::20, ::20].ravel()
+                p = w.precipitation[::20, ::20].ravel()
+                t_span = TEMP_REF_MAX - TEMP_REF_MIN
+                p_span = PRECIP_REF_MAX - PRECIP_REF_MIN
+                tn_cloud.append(np.clip((t - TEMP_REF_MIN) / t_span, 0, 1))
+                ds_cloud.append(1.0 - np.clip((p - PRECIP_REF_MIN) / p_span, 0, 1))
+        tn = np.concatenate(tn_cloud)
+        ds = np.concatenate(ds_cloud)
+
+        weak = []
+        for sid, genome in {
+            sp["species_id"]: eco_world.events.get_species(sp["species_id"])["genome"]
+            for sp in eco_world.events.list_species()
+        }.items():
+            warmth_pref = 1.0 - genome["frost_tolerance"]
+            suit = (
+                _gaussian_match(tn, warmth_pref, sigma=0.25)
+                * _gaussian_match(ds, genome["drought_tolerance"], sigma=0.25)
+            )
+            peak = float(suit.max())
+            if peak < 0.4:
+                weak.append((sid, round(peak, 3)))
+        assert not weak, f"Ancestors stranded off the climate manifold: {weak}"
 
     def test_valley_hardwood_is_tall(self, ancestor_genomes):
         """valley_hardwood should be a tall tree (max_height > 25)."""

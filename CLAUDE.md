@@ -71,7 +71,7 @@ Phases 0–8 are complete (full infrastructure + all three tiers + orchestrator/
 - Erosion is too gentle; landscapes lack dramatic carved features, and terrain is jagged/high (rideability work deferred to pre-render phase).
 - No river graph (only D8 flow accumulation raster; no discrete channel/confluence structure).
 - No upward event communication (lower tiers can't yet notify higher tiers via events).
-- **Warm-wet species stranded**: this world's temp/precip are anticorrelated (~−0.48), so warm-AND-wet conditions don't exist; 4 ancestor genomes target a niche off the achievable climate manifold. Genomes should eventually be redistributed onto the manifold.
+- **Warm-wet species stranding — addressed (2026-06-21)**: this world's temp/precip are anticorrelated (~−0.50), so warm-AND-wet conditions don't exist; previously ~half the 14 ancestors targeted niches off the achievable manifold and sat at the refugium floor. Ancestor creation now redistributes the *moisture* niche by conditioning `drought_tolerance` on the realized climate at each archetype's warmth (temperature identity + structure preserved), so all 14 establish at seeding. The 800yr baseline still needs regeneration (overnight) to confirm long-run persistence under competition.
 - Ecology tick is slow (~600s per 100yr-epoch on 1000×1000 × 14 species); optimization deferred until the dedicated mini PC arrives.
 
 Hardware: development on MacBook Pro (Apple Silicon); target mini PC to be sourced. Write CPU-vectorized numpy/numba code; reserve GPU compute for a later port with CPU fallback.
