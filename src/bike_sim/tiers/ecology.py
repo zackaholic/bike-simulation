@@ -412,6 +412,13 @@ class EcologyTier:
         # makes priority/incumbency effects produce *lasting* idiosyncratic
         # patches. 0.0 = off (no positive density dependence; current behavior).
         self.allee_theta = 0.0
+        # Incumbency advantage: asymmetric competition where the locally
+        # dominant species (higher density) exerts more competitive pressure
+        # on invaders. At strength 0.3, the incumbent gets a ±30% edge.
+        # Combined with Allee (B), this produces path-dependent post-
+        # disturbance communities — the first species to recolonize a scar
+        # holds it. 0.0 = off (symmetric competition; current behavior).
+        self.incumbency_strength = 0.0
         # Per-species mechanism multipliers, identity by default. Maps
         # species_id -> {mechanism: multiplier} where mechanism is one of
         # "growth", "mortality", "dispersal", "carrying_capacity". The tier
@@ -743,12 +750,22 @@ class EcologyTier:
             density = densities[sid]
             suit = self._compute_suitability(genome, weather)
 
-            # Effective competition load
+            # Effective competition load (with optional incumbency asymmetry).
             effective_load = np.zeros((n, n), dtype=np.float64)
             for other in sids:
                 alpha = alphas[(sid, other)]
                 if alpha > 0.01:
-                    effective_load += alpha * densities[other]
+                    if self.incumbency_strength > 0.0 and other != sid:
+                        # Incumbency: the locally dominant species exerts
+                        # more pressure. ratio→1 when other dominates,
+                        # →0 when sid dominates, 0.5 when equal.
+                        ratio = densities[other] / (
+                            densities[other] + density + 1e-10)
+                        factor = 1.0 + self.incumbency_strength * (
+                            2.0 * ratio - 1.0)
+                        effective_load += alpha * densities[other] * factor
+                    else:
+                        effective_load += alpha * densities[other]
 
             # Logistic growth with per-species carrying capacity set by suitability.
             # K_eff = K * suit means the species saturates at density K*suit.

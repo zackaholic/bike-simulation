@@ -763,3 +763,69 @@ See `docs/ground-cover-and-spatial-climate.md` for the complete design including
 **Lever map (for tuning, to revisit):** the world's response to a local shock is controlled by four roughly-independent knobs — (A) **weather period vs ~100yr healing** (`base_freq`, the meditative background tempo; currently ~300yr dominant ⇒ quasi-static tracking), (B) **Allee threshold** (this — persistence / spatial recolonization), (C) **recovery speed** (growth/dispersal scalars — how long a scar stays visible), (D) **incumbency/priority** (asymmetric competition so first-comers hold sites — path-dependence / lasting idiosyncratic patches; *not yet built*). B and D are the same idea on two sides of a density threshold (self-reinforcement vs invasion resistance), and **B is a prerequisite for D to matter** (priority only produces lasting patches if patches can persist).
 
 **Plan**: implemented B now; A and C are already constants; D (incumbency) is next. Then run a fire matrix (paired fire-vs-control differenced over the burn mask, climate frozen, ride-scale snapshots) across combinations to build an empirical "tuning → kind of change" table. No single setting is expected to be "right"; the goal is to understand the option space. The genome-redistribution regen (v2 baseline, 800yr) is the test bed: 10/14 species persist long-run (up from 7), and the 4 that die out are competitive *exclusion* (established then outcompeted) — the prime cases to watch when B/D are tuned.
+
+---
+
+## R2026-06-22 — Ride experience testing infrastructure
+
+**Decision**: Build a scenario-driven ride experience testing pipeline: shorter ride paths, snapshot-interval control in scenario YAML, ecology_config for toggle overrides (allee_theta, incumbency_strength), and `--ride-path` flag for post-run ride-experience comparison across snapshots.
+
+**Why**: The simulation was approaching a rideable state but we had no way to evaluate what the ride *feels like* at different timescales (month of daily use vs 6 months) or how new levers alter the experience. The existing strip-sample comparison (N-S and E-W through center) is 1D and global — it can't see local fire scars or spatial community boundaries. Ride-path sampling along a fixed route through the world shows what the rider would actually perceive changing.
+
+**Changes**:
+- `generate_ride_path()` now accepts `num_waypoints` (default 12, backward compat). 3-4 waypoints produce ~30km rides.
+- `Scenario` dataclass extended with `ecology_config` (dict of EcologyTier attribute overrides, whitelist-validated) and `snapshot_interval` (ecology ticks between version commits).
+- `run_epochs()` commits intermediate versions at the specified tick cadence.
+- `--ride-path` CLI flag on `scenario`/`batch` commands runs `run_snapshot_comparison()` after each scenario, producing ride comparison PNGs.
+- Test scenarios written for two timescales (ride_month: 200yr/32-tick snaps, ride_halfyear: 1000yr/200-tick snaps) and an Allee sweep (theta 0/1/3/8 with fire).
+
+**Key finding from Allee sweep**: theta=8 is catastrophically strong — it suppresses *all* sparse populations globally, not just in the fire scar. The fire was a localized trigger but the Allee threshold turned it into a global extinction event. Theta=1-3 shows the intended scar-persistence effect but still kills marginal species over 1000yr. Allee alone produces "blind" recovery — scars heal back to the same community. This motivated building incumbency (lever D) to add path-dependence.
+
+---
+
+## R2026-06-23 — Incumbency mechanism (lever D) and fire testing
+
+### Decision: Asymmetric Lotka-Volterra incumbency as a toggle
+
+**Decision**: Add `incumbency_strength` (default 0.0 = off) to EcologyTier. When positive, the effective competition load from species j on species i is scaled by an incumbency factor based on their relative local density:
+
+```
+ratio = density_j / (density_j + density_i + epsilon)
+factor = 1.0 + incumbency_strength * (2.0 * ratio - 1.0)
+effective_load += alpha * density_j * factor
+```
+
+At strength=0.3, the locally dominant species gets a ±30% competitive edge. Self-competition (alpha=1.0) is never modified. The mechanism is purely local (per-cell), purely relative (no absolute thresholds), and zero-cost when off.
+
+**Why**: The Allee threshold (lever B) makes fire scars persist but is "blind" — the same species always wins back because it has the highest suitability. Incumbency adds path-dependence: whichever species reaches viable density first in a cleared cell holds it against similar competitors. Post-fire communities can diverge from pre-fire ones, creating spatial history the rider can read.
+
+### Testing results (total-kill fire, vertical ride path through burn zone)
+
+Four configurations tested: incumbency only, B+D combo, each with 95% and 100% kill fires. Key findings:
+
+1. **95% kill preserves pre-fire dominance**. The 5% residual gives the former dominant a density head start at every cell — incumbency reinforces the status quo rather than creating novelty. This is realistic (mild fire = same community recovers) but not interesting for path-dependence.
+
+2. **100% kill produces genuine path-dependent succession**. Recovery comes entirely from edge dispersal. Grasses (high dispersal range) jump into the void first and establish explosive populations. Slower spreaders follow. The burn zone spends ~300yr as the most active area on the map with abnormally high densities before fading back to equilibrium. Different species compositions emerge inside vs outside the scar.
+
+3. **Incumbency alone (D without B) is the preferred setting**. Realistic succession (fast colonizers first, slow spreaders later), full recovery in 300-400yr (~couple months of riding), and the scar is a temporary *event* rather than a permanent wound. The "active zone" effect — high-density transient that fades — was emergent and compelling.
+
+4. **B+D (Allee + incumbency) is too aggressive**. Recovery takes ~450yr, some species never return, and the Allee threshold penalizes marginal populations globally, not just in the scar. Harsher species boundaries emerge, which may not be desirable. The Allee effect's global sparse-population penalty dominates the local incumbency effect.
+
+### Revised lever map
+
+The original plan assumed "B is a prerequisite for D to matter." Testing disproved this. D alone produces the most compelling dynamics because:
+- Incumbency is purely relative (local density ratio) — it only fires where species are actively competing for newly opened space
+- Allee is an absolute threshold — it penalizes *every* sparse population everywhere, making the world fragile
+- The combination doesn't produce "B makes D's effects last longer" but rather "B kills marginal species globally while D creates local path-dependence" — two independent effects where B dominates
+
+**Current best configuration**: `incumbency_strength=0.3`, `allee_theta=0.0`. Fire as the primary spatial perturbation source, joining climate cycles (slow/global) and competition (always-on/local) as the three rhythms of ecological change.
+
+### Fire as third perturbation source
+
+Fire is now validated as a qualitatively different perturbation from climate and competition. Future design directions (not yet built):
+- Climate-driven fire frequency (dry periods → more fires)
+- Geography-driven spread (cellular automata, terrain/moisture barriers)
+- Species-differential mortality (tall trees survive grass fires, etc.)
+- Small fires every few years on an unmanaged-wilderness schedule
+
+These build on the existing shock infrastructure without touching the core tick rules — fire remains an environmental perturbation, consistent with the "drama from perturbing the environment, not tick knobs" principle.

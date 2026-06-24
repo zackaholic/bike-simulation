@@ -1,0 +1,7 @@
+name: ride_month
+description: "Month of daily riding (20 snapshots at 8-year intervals). Frozen weather — isolates ecology-only drift."
+weather_mode: frozen
+sustained: []
+shocks: []
+run_years: 200
+snapshot_interval: 32   # 8 years (4 ticks/yr × 8yr)

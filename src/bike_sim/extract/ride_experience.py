@@ -237,6 +237,7 @@ def _order_waypoints_tsp(
 def generate_ride_path(
     heightmap: np.ndarray,
     world_seed: int,
+    num_waypoints: int = NUM_WAYPOINTS,
 ) -> list[tuple[int, int]]:
     """Generate a full ride path through the world.
 
@@ -244,12 +245,15 @@ def generate_ride_path(
     2. Order them via nearest-neighbor TSP.
     3. Connect consecutive waypoints via A* on a grade cost surface.
 
+    *num_waypoints* controls path length: 12 (default) covers most of the
+    50 km world (~400 km loop); 3-4 produces a ~25-35 km ride.
+
     Returns list of (row, col) cells comprising the path.
     """
     from bike_sim.rng import create_rng
     rng = create_rng(world_seed, "ride", "path", 0)
 
-    waypoints = _generate_waypoints(heightmap, rng)
+    waypoints = _generate_waypoints(heightmap, rng, num_points=num_waypoints)
     ordered = _order_waypoints_tsp(waypoints)
 
     full_path: list[tuple[int, int]] = []

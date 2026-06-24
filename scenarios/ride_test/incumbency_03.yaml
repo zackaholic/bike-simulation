@@ -1,0 +1,10 @@
+name: incumbency_03
+description: "Large fire with incumbency only (strength=0.3). First recolonizer holds territory."
+weather_mode: frozen
+sustained: []
+shocks:
+  - {type: fire, location: [500, 500], radius: 120, kill: 0.95}
+run_years: 1000
+snapshot_interval: 200   # 50 years
+ecology_config:
+  incumbency_strength: 0.3

@@ -1,0 +1,7 @@
+name: ride_halfyear
+description: "Six months of daily riding (20 snapshots at 50-year intervals). Cycling weather — shows climate-driven biome migration."
+weather_mode: cycling
+sustained: []
+shocks: []
+run_years: 1000
+snapshot_interval: 200   # 50 years (4 ticks/yr × 50yr)

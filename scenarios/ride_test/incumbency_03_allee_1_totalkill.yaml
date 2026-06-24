@@ -1,0 +1,11 @@
+name: incumbency_03_allee_1_totalkill
+description: "Total kill fire (100%) with incumbency (0.3) + Allee (theta=1). Slow edge-only recolonization with path-dependent outcome."
+weather_mode: frozen
+sustained: []
+shocks:
+  - {type: fire, location: [500, 500], radius: 120, kill: 1.0}
+run_years: 1000
+snapshot_interval: 200   # 50 years
+ecology_config:
+  incumbency_strength: 0.3
+  allee_theta: 1.0

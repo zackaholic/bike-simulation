@@ -1,0 +1,11 @@
+name: incumbency_03_allee_1
+description: "Large fire with incumbency (0.3) + Allee (theta=1). The B+D combo: slow recolonization with path-dependent outcome."
+weather_mode: frozen
+sustained: []
+shocks:
+  - {type: fire, location: [500, 500], radius: 120, kill: 0.95}
+run_years: 1000
+snapshot_interval: 200   # 50 years
+ecology_config:
+  incumbency_strength: 0.3
+  allee_theta: 1.0

@@ -1,0 +1,10 @@
+name: allee_theta_0
+description: "Control: large fire, no Allee effect. Baseline fire-scar recovery rate."
+weather_mode: frozen
+sustained: []
+shocks:
+  - {type: fire, location: [500, 500], radius: 120, kill: 0.95}
+run_years: 1000
+snapshot_interval: 200   # 50 years
+ecology_config:
+  allee_theta: 0.0

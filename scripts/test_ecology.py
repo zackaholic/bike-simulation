@@ -383,6 +383,7 @@ def run_epochs(
     trigger_prefix="run",
     epoch_callback=None,
     pre_tick=None,
+    snapshot_interval=None,
 ):
     """Run ``n_epochs`` ecology epochs, checking for equilibrium each epoch.
 
@@ -399,6 +400,10 @@ def run_epochs(
     — used by the scenario runner to push time-bounded mechanism modifiers
     (blights etc.) onto the ecology tier for that tick.
 
+    ``snapshot_interval`` (optional, int) — when set, commit intermediate
+    world versions every N ecology ticks so the ride-experience comparison
+    can sample finer time-steps than the default 100-yr epoch.
+
     Returns ``(history, eq_reached, eq_year, total_time)`` where ``eq_year`` is
     the post-start year at which equilibrium was first reached (or None).
     """
@@ -407,6 +412,7 @@ def run_epochs(
     history: list[dict] = []
     eq_reached = False
     eq_year = None
+    ticks_since_snap = 0  # relative counter for snapshot cadence
 
     start_time = time.time()
 
@@ -422,6 +428,15 @@ def run_epochs(
             if pre_tick is not None:
                 pre_tick(tick)
             eco.tick(weather_for_tick(tick))
+            ticks_since_snap += 1
+
+            # Intermediate snapshot for fine-grained ride comparisons.
+            if snapshot_interval and ticks_since_snap >= snapshot_interval:
+                world.commit_version(
+                    trigger=f"{trigger_prefix} snap tick {tick}")
+                world.save(world_dir / "world.json")
+                world.rasters.set_version(world.current_version + 1)
+                ticks_since_snap = 0
 
         world.commit_version(trigger=f"{trigger_prefix} epoch {epoch}")
         world.save(world_dir / "world.json")
@@ -501,9 +516,11 @@ class Scenario:
     shocks: list = field(default_factory=list)
     modifiers: list = field(default_factory=list)
     run_years: int = 500
+    ecology_config: dict = field(default_factory=dict)
+    snapshot_interval: int | None = None  # ecology ticks between snapshots
 
     def to_dict(self):
-        return {
+        d = {
             "name": self.name,
             "description": self.description,
             "weather_mode": self.weather_mode,
@@ -512,6 +529,11 @@ class Scenario:
             "modifiers": self.modifiers,
             "run_years": self.run_years,
         }
+        if self.ecology_config:
+            d["ecology_config"] = self.ecology_config
+        if self.snapshot_interval is not None:
+            d["snapshot_interval"] = self.snapshot_interval
+        return d
 
 
 def load_scenario(path) -> Scenario:
@@ -532,6 +554,15 @@ def load_scenario(path) -> Scenario:
     modifiers = raw.get("modifiers", []) or []
     _validate_modifiers(path, modifiers)
 
+    ecology_config = raw.get("ecology_config", {}) or {}
+    _validate_ecology_config(path, ecology_config)
+
+    snapshot_interval = raw.get("snapshot_interval")
+    if snapshot_interval is not None:
+        snapshot_interval = int(snapshot_interval)
+        if snapshot_interval <= 0:
+            raise ValueError(f"Scenario {path}: snapshot_interval must be > 0")
+
     return Scenario(
         name=raw["name"],
         description=raw.get("description", ""),
@@ -540,7 +571,25 @@ def load_scenario(path) -> Scenario:
         shocks=raw.get("shocks", []) or [],
         modifiers=modifiers,
         run_years=int(raw.get("run_years", 500)),
+        ecology_config=ecology_config,
+        snapshot_interval=snapshot_interval,
     )
+
+
+VALID_ECOLOGY_CONFIG_KEYS = {
+    "allee_theta", "incumbency_strength", "refugium_floor",
+    "enable_extinction", "enable_speciation", "enable_individuals",
+}
+
+
+def _validate_ecology_config(path, config):
+    """Validate ecology_config keys; raise ValueError on unknown keys."""
+    unknown = set(config.keys()) - VALID_ECOLOGY_CONFIG_KEYS
+    if unknown:
+        raise ValueError(
+            f"Scenario {path}: unknown ecology_config keys {unknown}. "
+            f"Allowed: {sorted(VALID_ECOLOGY_CONFIG_KEYS)}"
+        )
 
 
 VALID_MECHANISMS = ("growth", "mortality", "dispersal", "carrying_capacity")
@@ -1358,8 +1407,13 @@ def _compute_species_deltas(before_summary, after_summary):
     return sorted(deltas, key=lambda d: -(d["density_after"] - d["density_before"]))
 
 
-def run_scenario(scenario, baseline_dir, results_root, keep=False):
+def run_scenario(scenario, baseline_dir, results_root, keep=False,
+                  ride_path_file=None):
     """Run one scenario on a fresh copy of the baseline; write results.
+
+    When *ride_path_file* is provided, the ride experience is sampled at every
+    snapshot version after the run completes and a comparison PNG is written to
+    the results directory.
 
     Returns the result dict (also written to result.json). The baseline world is
     never mutated; a scratch copy is made, run, and deleted unless ``keep``.
@@ -1427,6 +1481,12 @@ def run_scenario(scenario, baseline_dir, results_root, keep=False):
 
     eco = _configure_eco(EcologyTier(world))
 
+    # Apply scenario-level ecology config overrides (e.g. allee_theta).
+    for key, value in scenario.ecology_config.items():
+        setattr(eco, key, value)
+    if scenario.ecology_config:
+        print(f"  ecology_config: {scenario.ecology_config}")
+
     # Per-tick hook: (1) push time-bounded mechanism modifiers (blights etc.)
     # onto the tier, (2) fire timed shocks when the run reaches their at_year.
     # Both are no-ops when the scenario declares none. Timed shocks mutate the
@@ -1470,6 +1530,7 @@ def run_scenario(scenario, baseline_dir, results_root, keep=False):
         trigger_prefix=f"scenario {scenario.name}",
         epoch_callback=epoch_callback,
         pre_tick=pre_tick,
+        snapshot_interval=scenario.snapshot_interval,
     )
 
     world.save(scratch_dir / "world.json")
@@ -1532,6 +1593,18 @@ def run_scenario(scenario, baseline_dir, results_root, keep=False):
             title=f"{scenario.name}: biome migration over time",
         )
 
+    # Ride-experience comparison across snapshots.
+    if ride_path_file is not None:
+        from bike_sim.extract.ride_experience import (
+            load_path, run_snapshot_comparison, save_path,
+        )
+        ride_path = load_path(ride_path_file)
+        # run_snapshot_comparison loads the path from output_dir/ride_path.json.
+        save_path(ride_path, out_dir / "ride_path.json")
+        print(f"\n  Sampling ride experience across {world.current_version} versions...")
+        run_snapshot_comparison(scratch_dir, output_dir=out_dir)
+        print(f"  Ride comparison: {out_dir / 'ride_comparison.png'}")
+
     print(f"\n  Results: {out_dir}/")
 
     # Clean up scratch unless asked to keep it.
@@ -1548,7 +1621,8 @@ def cmd_scenario(args):
     scenario = load_scenario(args.scenario_file)
     runid = datetime.now().strftime("%Y%m%d_%H%M%S")
     results_root = Path(args.results_root) / runid
-    run_scenario(scenario, args.baseline_dir, results_root, keep=args.keep)
+    run_scenario(scenario, args.baseline_dir, results_root, keep=args.keep,
+                 ride_path_file=args.ride_path)
 
 
 def _top_movers(deltas, n=3):
@@ -1584,7 +1658,8 @@ def cmd_batch(args):
     rows = []
     for sf in scenario_files:
         scenario = load_scenario(sf)
-        result = run_scenario(scenario, args.baseline_dir, results_root, keep=args.keep)
+        result = run_scenario(scenario, args.baseline_dir, results_root, keep=args.keep,
+                              ride_path_file=args.ride_path)
         winners, losers = _top_movers(result["species_deltas"])
         eq = (f"+{result['time_to_equilibrium_years']}yr"
               if result["equilibrium_reached"] else "no")
@@ -1649,6 +1724,8 @@ def main():
     p_sc.add_argument("scenario_file", help="Path to a scenario .yaml file")
     p_sc.add_argument("--results-root", default="results", help="Root dir for results")
     p_sc.add_argument("--keep", action="store_true", help="Keep the scratch world copy")
+    p_sc.add_argument("--ride-path", default=None,
+                      help="Path to a ride_path.json; sample ride experience at each snapshot")
 
     # batch
     p_ba = subparsers.add_parser("batch", help="Run every *.yaml scenario in a dir")
@@ -1656,6 +1733,8 @@ def main():
     p_ba.add_argument("scenarios_dir", help="Directory of scenario .yaml files")
     p_ba.add_argument("--results-root", default="results", help="Root dir for results")
     p_ba.add_argument("--keep", action="store_true", help="Keep the scratch world copies")
+    p_ba.add_argument("--ride-path", default=None,
+                      help="Path to a ride_path.json; sample ride experience at each snapshot")
 
     args = parser.parse_args()
 
