@@ -1,0 +1,45 @@
+[gd_scene format=3 uid="uid://ceggndpx5k23c"]
+
+[ext_resource type="Script" uid="uid://c287oklte004p" path="res://main.gd" id="1_lquwl"]
+[ext_resource type="Script" uid="uid://ip6noukhl2cn" path="res://scripts/chunk_streamer.gd" id="3_7mycd"]
+[ext_resource type="Script" uid="uid://cfbfjwh076x51" path="res://scripts/hardware_input.gd" id="4_272bh"]
+[ext_resource type="Script" uid="uid://3tcm1dvq4qwy" path="res://scripts/hud.gd" id="5_5vw27"]
+[ext_resource type="Script" uid="uid://pye2diwl5v5x" path="res://scripts/path_manager.gd" id="5_7mycd"]
+[ext_resource type="Script" uid="uid://vcatvoxnwjtr" path="res://scripts/path_follower.gd" id="6_272bh"]
+
+[sub_resource type="Curve3D" id="Curve3D_5vw27"]
+
+[node name="Main" type="Node3D" unique_id=1098897490]
+script = ExtResource("1_lquwl")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=291508072]
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=149241724]
+
+[node name="ChunkStreamer" type="Node3D" parent="." unique_id=2083533033]
+script = ExtResource("3_7mycd")
+
+[node name="HardwareInput" type="Node" parent="." unique_id=2031165838]
+script = ExtResource("4_272bh")
+
+[node name="HUD" type="CanvasLayer" parent="." unique_id=546308466]
+script = ExtResource("5_5vw27")
+
+[node name="SpeedLabel" type="Label" parent="HUD" unique_id=2033634271]
+offset_right = 40.0
+offset_bottom = 23.0
+
+[node name="HRLabel" type="Label" parent="HUD" unique_id=300639176]
+offset_right = 40.0
+offset_bottom = 23.0
+
+[node name="PathManager" type="Path3D" parent="." unique_id=1525190864]
+curve = SubResource("Curve3D_5vw27")
+script = ExtResource("5_7mycd")
+
+[node name="PathFollower" type="PathFollow3D" parent="PathManager" unique_id=987229373]
+script = ExtResource("6_272bh")
+
+[node name="Camera3D" type="Camera3D" parent="PathManager/PathFollower" unique_id=1938140929]
+transform = Transform3D(1, 0, 0, 0, 0.98481, -0.17365, 0, 0.17365, 0.98481, 0, 0, 0)
+fov = 60.0

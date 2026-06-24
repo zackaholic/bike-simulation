@@ -197,6 +197,21 @@ def _cmd_ride_compare(args: argparse.Namespace) -> None:
     run_snapshot_comparison(args.world_dir, output_dir=output_dir)
 
 
+def _cmd_extract_godot(args: argparse.Namespace) -> None:
+    """Extract world as Godot-compatible terrain chunks."""
+    import os
+
+    from bike_sim.extract.godot.extractor import extract_godot_terrain
+
+    output_dir = args.output_dir
+    if output_dir is None:
+        output_dir = os.path.expanduser(
+            "~/Library/Application Support/Godot/app_userdata/"
+            "Bike Trainer/chunks"
+        )
+    extract_godot_terrain(args.world_dir, output_dir)
+
+
 def main(argv: list[str] | None = None) -> None:
     """Parse arguments and dispatch to the appropriate subcommand."""
     parser = argparse.ArgumentParser(
@@ -261,6 +276,17 @@ def main(argv: list[str] | None = None) -> None:
         help="Output directory (default: <world_dir>/ride_output/).",
     )
 
+    # -- extract-godot --
+    p_godot = subparsers.add_parser(
+        "extract-godot", help="Extract world as Godot terrain chunks.",
+    )
+    p_godot.add_argument("world_dir", help="Path to an existing world directory.")
+    p_godot.add_argument(
+        "--output-dir", default=None,
+        help="Output directory for .chunk files and manifest.json "
+             "(default: Godot user://chunks/).",
+    )
+
     args = parser.parse_args(argv)
 
     dispatch = {
@@ -272,6 +298,7 @@ def main(argv: list[str] | None = None) -> None:
         "visualize": _cmd_visualize,
         "ride-experience": _cmd_ride_experience,
         "ride-compare": _cmd_ride_compare,
+        "extract-godot": _cmd_extract_godot,
     }
     dispatch[args.command](args)
 

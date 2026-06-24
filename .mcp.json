@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "godot-docs": {
+      "command": "python3",
+      "args": ["/Users/zack/Projects/Bike-Trainer/godot_docs/mcp_server.py"]
+    }
+  }
+}
