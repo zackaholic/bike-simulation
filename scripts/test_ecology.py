@@ -84,9 +84,7 @@ REFUGIUM_FLOOR = 1.0
 
 
 def _configure_eco(eco):
-    """Configure an EcologyTier for testing: no extinction/speciation/individuals, refugium on."""
-    eco.enable_extinction = False
-    eco.enable_speciation = False
+    """Configure an EcologyTier for testing: no individuals, refugium on."""
     eco.enable_individuals = False
     eco.refugium_floor = REFUGIUM_FLOOR
     return eco
@@ -578,7 +576,7 @@ def load_scenario(path) -> Scenario:
 
 VALID_ECOLOGY_CONFIG_KEYS = {
     "allee_theta", "incumbency_strength", "refugium_floor",
-    "enable_extinction", "enable_speciation", "enable_individuals",
+    "enable_individuals",
 }
 
 

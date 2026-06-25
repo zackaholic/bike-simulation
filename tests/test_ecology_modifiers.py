@@ -46,8 +46,6 @@ def make_weather(season: int, **overrides) -> SeasonalWeather:
 
 def _configure(eco: EcologyTier) -> EcologyTier:
     """Disable the deferred mechanics so only grow/compete/disperse runs."""
-    eco.enable_extinction = False
-    eco.enable_speciation = False
     eco.enable_individuals = False
     eco.refugium_floor = 0.0
     return eco

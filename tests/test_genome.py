@@ -76,24 +76,6 @@ def ancestor_genomes(eco_world):
     return result
 
 
-@pytest.fixture(scope="module")
-def multi_tick_world(tmp_path_factory):
-    """A world advanced 200+ ecology ticks to trigger speciation."""
-    tmp = tmp_path_factory.mktemp("genome_multi")
-    w = World.create(tmp / "world", seed=42)
-    GeologyTier(w).tick()
-    ClimateHydrologyTier(w, erosion_params=FAST_EROSION).tick()
-    heightmap = w.rasters.read_layer("geology", "heightmap")
-    ws = WeatherSystem(w.seed, heightmap)
-    eco = EcologyTier(w)
-    # Run 201 ticks to hit speciation check at tick 200
-    for i in range(201):
-        year = i * 0.25
-        season = i % 4
-        eco.tick(ws.generate(year, season))
-    return w
-
-
 # ---------------------------------------------------------------------------
 # 1. Genome completeness
 # ---------------------------------------------------------------------------
@@ -277,66 +259,7 @@ class TestAncestorTraitValues:
 
 
 # ---------------------------------------------------------------------------
-# 4. Speciation drift
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.slow
-class TestSpeciationDrift:
-    def test_speciated_species_have_6_traits(self, multi_tick_world):
-        """Any species produced by speciation must have all 6 traits."""
-        species = multi_tick_world.events.list_species()
-        children = [sp for sp in species if sp["parent_id"] is not None]
-        if len(children) == 0:
-            pytest.skip("No speciation occurred -- stochastic, cannot test drift")
-        for sp in children:
-            sid = sp["species_id"]
-            genome = multi_tick_world.events.get_species(sid)["genome"]
-            missing = ALL_TRAITS - genome.keys()
-            assert not missing, (
-                f"Speciated species {sid} missing traits: {missing}"
-            )
-            assert len(genome) == 6, (
-                f"Speciated species {sid} has {len(genome)} traits, expected 6"
-            )
-
-    def test_dispersal_range_stays_int_after_speciation(self, multi_tick_world):
-        """dispersal_range must remain an integer in [1, 6] after speciation."""
-        species = multi_tick_world.events.list_species()
-        children = [sp for sp in species if sp["parent_id"] is not None]
-        if not children:
-            pytest.skip("No speciation occurred -- stochastic")
-        for sp in children:
-            sid = sp["species_id"]
-            genome = multi_tick_world.events.get_species(sid)["genome"]
-            val = genome["dispersal_range"]
-            assert isinstance(val, int), (
-                f"Speciated {sid}: dispersal_range={val} is {type(val).__name__}, expected int"
-            )
-            assert 1 <= val <= 6, (
-                f"Speciated {sid}: dispersal_range={val} outside [1, 6]"
-            )
-
-    def test_bounded_traits_stay_in_bounds_after_speciation(self, multi_tick_world):
-        """All bounded traits must stay within their valid ranges after drift."""
-        species = multi_tick_world.events.list_species()
-        children = [sp for sp in species if sp["parent_id"] is not None]
-        if not children:
-            pytest.skip("No speciation occurred -- stochastic")
-        for sp in children:
-            sid = sp["species_id"]
-            genome = multi_tick_world.events.get_species(sid)["genome"]
-            for trait in BOUNDED_FUNCTIONAL:
-                val = genome[trait]
-                assert 0.0 <= val <= 1.0, (
-                    f"Speciated {sid}: {trait}={val} outside [0, 1]"
-                )
-            assert genome["max_height"] > 0
-            assert genome["lifespan"] > 0
-
-
-# ---------------------------------------------------------------------------
-# 5. Determinism
+# 4. Determinism
 # ---------------------------------------------------------------------------
 
 
